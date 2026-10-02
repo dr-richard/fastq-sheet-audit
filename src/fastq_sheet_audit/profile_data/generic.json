@@ -1,0 +1,15 @@
+{
+  "profile_id": "generic",
+  "display_name": "Generic FASTQ sheet",
+  "pipeline": null,
+  "verified_version": null,
+  "verified_date": null,
+  "source_reference": "fastq-sheet-audit generic export specification",
+  "columns": [
+    {"name": "sample", "required_column": true, "required_value": true},
+    {"name": "r1", "required_column": true, "required_value": true},
+    {"name": "r2", "required_column": false, "required_value": false}
+  ],
+  "single_end_supported": true,
+  "notes": "Conservative generic export; no pipeline compatibility claim. R2 may be omitted or empty for single-end data."
+}

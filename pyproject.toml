@@ -26,6 +26,9 @@ fastq-sheet-audit = "fastq_sheet_audit.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"fastq_sheet_audit.profile_data" = ["*.json"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
