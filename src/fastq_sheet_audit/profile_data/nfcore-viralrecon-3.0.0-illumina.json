@@ -1,0 +1,15 @@
+{
+  "profile_id": "nfcore-viralrecon-3.0.0-illumina",
+  "display_name": "nf-core/viralrecon 3.0.0 — Illumina",
+  "pipeline": "nf-core/viralrecon",
+  "verified_version": "3.0.0",
+  "verified_date": "2026-10-03",
+  "source_reference": "Official nf-core/viralrecon 3.0.0 usage documentation: https://nf-co.re/viralrecon/3.0.0/docs/usage/; official tagged input schema: https://github.com/nf-core/viralrecon/blob/3.0.0/assets/schema_input.json",
+  "columns": [
+    {"name": "sample", "required_column": true, "required_value": true},
+    {"name": "fastq_1", "required_column": true, "required_value": true},
+    {"name": "fastq_2", "required_column": true, "required_value": false}
+  ],
+  "single_end_supported": true,
+  "notes": "Illumina-only samplesheet profile; no Nanopore compatibility is claimed. The fastq_2 column is required but its values may be empty for single-end Illumina data. Viralrecon documentation says dashes and spaces in sample names are converted to underscores downstream; fastq-sheet-audit itself does not silently rename or normalize sample IDs. No biological metadata is inferred or defaulted."
+}

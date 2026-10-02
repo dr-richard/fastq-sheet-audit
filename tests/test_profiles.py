@@ -126,6 +126,7 @@ def test_invalid_column_types(field, value):
 def test_deterministic_listing():
     assert list_profile_ids() == (
         "generic", "nfcore-methylseq-4.2.0", "nfcore-rnaseq-3.27.0", "nfcore-smrnaseq-2.4.1",
+        "nfcore-viralrecon-3.0.0-illumina",
     )
     assert list_profile_ids() == list_profile_ids()
 
@@ -145,6 +146,79 @@ def test_offline_loading(monkeypatch):
     assert load_profile("nfcore-rnaseq-3.27.0").profile_id == "nfcore-rnaseq-3.27.0"
     assert load_profile("nfcore-methylseq-4.2.0").profile_id == "nfcore-methylseq-4.2.0"
     assert load_profile("nfcore-smrnaseq-2.4.1").profile_id == "nfcore-smrnaseq-2.4.1"
+    assert load_profile("nfcore-viralrecon-3.0.0-illumina").profile_id == "nfcore-viralrecon-3.0.0-illumina"
+
+
+def test_load_nfcore_viralrecon_illumina_metadata():
+    profile = load_profile("nfcore-viralrecon-3.0.0-illumina")
+    assert profile.profile_id == "nfcore-viralrecon-3.0.0-illumina"
+    assert profile.display_name == "nf-core/viralrecon 3.0.0 — Illumina"
+    assert profile.pipeline == "nf-core/viralrecon"
+    assert profile.verified_version == "3.0.0"
+    assert profile.verified_date == "2026-10-03"
+    assert profile.source_reference == (
+        "Official nf-core/viralrecon 3.0.0 usage documentation: "
+        "https://nf-co.re/viralrecon/3.0.0/docs/usage/; official tagged input schema: "
+        "https://github.com/nf-core/viralrecon/blob/3.0.0/assets/schema_input.json"
+    )
+    assert profile.single_end_supported is True
+
+
+def test_nfcore_viralrecon_illumina_column_contract():
+    profile = load_profile("nfcore-viralrecon-3.0.0-illumina")
+    assert [column.name for column in profile.columns] == ["sample", "fastq_1", "fastq_2"]
+    assert [(column.required_column, column.required_value) for column in profile.columns] == [
+        (True, True), (True, True), (True, False),
+    ]
+    assert all(column.default_value is None for column in profile.columns)
+    assert all(column.allowed_values is None for column in profile.columns)
+    data = json.loads(files("fastq_sheet_audit.profile_data").joinpath(
+        "nfcore-viralrecon-3.0.0-illumina.json"
+    ).read_text())
+    assert all("default_value" not in column and "allowed_values" not in column
+               for column in data["columns"])
+
+
+def test_nfcore_viralrecon_notes_explain_scope_and_preserve_sample_ids():
+    profile = load_profile("nfcore-viralrecon-3.0.0-illumina")
+    assert profile.notes == (
+        "Illumina-only samplesheet profile; no Nanopore compatibility is claimed. "
+        "The fastq_2 column is required but its values may be empty for single-end Illumina data. "
+        "Viralrecon documentation says dashes and spaces in sample names are converted to "
+        "underscores downstream; fastq-sheet-audit itself does not silently rename or normalize "
+        "sample IDs. No biological metadata is inferred or defaulted."
+    )
+
+
+def test_smrnaseq_profile_remains_unchanged():
+    expected = {
+        "profile_id": "nfcore-smrnaseq-2.4.1",
+        "display_name": "nf-core/smrnaseq 2.4.1",
+        "pipeline": "nf-core/smrnaseq",
+        "verified_version": "2.4.1",
+        "verified_date": "2026-10-03",
+        "source_reference": (
+            "Official nf-core/smrnaseq 2.4.1 usage documentation: "
+            "https://nf-co.re/smrnaseq/2.4.1/docs/usage/; official tagged input schema: "
+            "https://github.com/nf-core/smrnaseq/blob/2.4.1/assets/schema_input.json"
+        ),
+        "columns": [
+            {"name": "sample", "required_column": True, "required_value": True},
+            {"name": "fastq_1", "required_column": True, "required_value": True},
+            {"name": "fastq_2", "required_column": False, "required_value": False},
+        ],
+        "single_end_supported": True,
+        "notes": (
+            "Pipeline documentation says R2 may be supplied, but downstream small-RNA processing "
+            "primarily uses R1. This profile is declarative metadata only; fastq-sheet-audit "
+            "does not silently discard R2. No biological metadata is inferred or defaulted."
+        ),
+    }
+    data = json.loads(files("fastq_sheet_audit.profile_data").joinpath(
+        "nfcore-smrnaseq-2.4.1.json"
+    ).read_text())
+    assert data == expected
+    assert load_profile("nfcore-smrnaseq-2.4.1") == parse_profile(json.dumps(expected))
 
 
 def test_load_nfcore_smrnaseq_metadata():
