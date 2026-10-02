@@ -7,6 +7,12 @@ import pytest
 from fastq_sheet_audit.profiles import list_profile_ids, load_profile, parse_profile
 
 
+FASTQ_PROFILE_IDS = (
+    "generic", "nfcore-methylseq-4.2.0", "nfcore-rnaseq-3.27.0", "nfcore-smrnaseq-2.4.1",
+    "nfcore-viralrecon-3.0.0-illumina",
+)
+
+
 def generic_data():
     return json.loads(files("fastq_sheet_audit.profile_data").joinpath("generic.json").read_text())
 
@@ -127,6 +133,7 @@ def test_deterministic_listing():
     assert list_profile_ids() == (
         "generic", "nfcore-methylseq-4.2.0", "nfcore-rnaseq-3.27.0", "nfcore-smrnaseq-2.4.1",
         "nfcore-viralrecon-3.0.0-illumina",
+        "nfcore-viralrecon-3.0.0-nanopore",
     )
     assert list_profile_ids() == list_profile_ids()
 
@@ -147,6 +154,7 @@ def test_offline_loading(monkeypatch):
     assert load_profile("nfcore-methylseq-4.2.0").profile_id == "nfcore-methylseq-4.2.0"
     assert load_profile("nfcore-smrnaseq-2.4.1").profile_id == "nfcore-smrnaseq-2.4.1"
     assert load_profile("nfcore-viralrecon-3.0.0-illumina").profile_id == "nfcore-viralrecon-3.0.0-illumina"
+    assert load_profile("nfcore-viralrecon-3.0.0-nanopore").profile_id == "nfcore-viralrecon-3.0.0-nanopore"
 
 
 def test_load_nfcore_viralrecon_illumina_metadata():
@@ -410,7 +418,7 @@ def test_dotted_profile_id_validation_rejects_unsafe_ids(profile_id):
         parse_profile(json.dumps(data))
 
 
-@pytest.mark.parametrize("profile_id", list_profile_ids())
+@pytest.mark.parametrize("profile_id", FASTQ_PROFILE_IDS)
 def test_every_bundled_column_declares_string_type(profile_id):
     data = json.loads(files("fastq_sheet_audit.profile_data").joinpath(
         profile_id + ".json"
@@ -484,7 +492,7 @@ def test_missing_value_type_rejected():
         parse_profile(json.dumps(data))
 
 
-@pytest.mark.parametrize("profile_id", list_profile_ids())
+@pytest.mark.parametrize("profile_id", FASTQ_PROFILE_IDS)
 def test_bundled_input_kind_and_single_end_support(profile_id):
     data = json.loads(files("fastq_sheet_audit.profile_data").joinpath(
         profile_id + ".json"
@@ -548,3 +556,79 @@ def test_missing_input_kind_rejected():
     del data["input_kind"]
     with pytest.raises(ValueError, match="missing fields: input_kind"):
         parse_profile(json.dumps(data))
+
+
+def test_load_nfcore_viralrecon_nanopore_metadata():
+    profile = load_profile("nfcore-viralrecon-3.0.0-nanopore")
+    assert profile.profile_id == "nfcore-viralrecon-3.0.0-nanopore"
+    assert profile.display_name == "nf-core/viralrecon 3.0.0 — Nanopore"
+    assert profile.pipeline == "nf-core/viralrecon"
+    assert profile.verified_version == "3.0.0"
+    assert profile.verified_date == "2026-10-03"
+    assert profile.source_reference == (
+        "Official nf-core/viralrecon 3.0.0 usage documentation: "
+        "https://nf-co.re/viralrecon/3.0.0/docs/usage/; official tagged input schema: "
+        "https://github.com/nf-core/viralrecon/blob/3.0.0/assets/schema_input.json"
+    )
+    assert profile.input_kind == "barcode_mapping"
+    assert profile.single_end_supported is None
+
+
+def test_nfcore_viralrecon_nanopore_column_contract():
+    profile = load_profile("nfcore-viralrecon-3.0.0-nanopore")
+    assert [column.name for column in profile.columns] == ["sample", "barcode"]
+    assert [column.value_type for column in profile.columns] == ["string", "integer"]
+    assert all(column.required_column and column.required_value for column in profile.columns)
+    assert all(column.default_value is None for column in profile.columns)
+    assert all(column.allowed_values is None for column in profile.columns)
+    assert not {"fastq_1", "fastq_2"}.intersection(column.name for column in profile.columns)
+    data = json.loads(files("fastq_sheet_audit.profile_data").joinpath(
+        "nfcore-viralrecon-3.0.0-nanopore.json"
+    ).read_text())
+    assert all("default_value" not in column and "allowed_values" not in column
+               for column in data["columns"])
+
+
+def test_nfcore_viralrecon_nanopore_notes():
+    profile = load_profile("nfcore-viralrecon-3.0.0-nanopore")
+    assert profile.notes == (
+        "Nanopore-only barcode mapping sheet, not a FASTQ samplesheet. Nanopore FASTQs are "
+        "supplied separately through viralrecon's Nanopore FASTQ directory layout. "
+        "Barcode must be an integer. Viralrecon documentation says dashes and spaces in "
+        "sample names are converted to underscores downstream; fastq-sheet-audit itself "
+        "does not silently rename or normalize sample IDs. No biological metadata is inferred or defaulted."
+    )
+
+
+def test_viralrecon_illumina_profile_remains_unchanged():
+    expected = {
+        "profile_id": "nfcore-viralrecon-3.0.0-illumina",
+        "display_name": "nf-core/viralrecon 3.0.0 — Illumina",
+        "pipeline": "nf-core/viralrecon",
+        "verified_version": "3.0.0",
+        "verified_date": "2026-10-03",
+        "source_reference": (
+            "Official nf-core/viralrecon 3.0.0 usage documentation: "
+            "https://nf-co.re/viralrecon/3.0.0/docs/usage/; official tagged input schema: "
+            "https://github.com/nf-core/viralrecon/blob/3.0.0/assets/schema_input.json"
+        ),
+        "columns": [
+            {"name": "sample", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_1", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_2", "value_type": "string", "required_column": True, "required_value": False},
+        ],
+        "input_kind": "fastq_samplesheet",
+        "single_end_supported": True,
+        "notes": (
+            "Illumina-only samplesheet profile; no Nanopore compatibility is claimed. "
+            "The fastq_2 column is required but its values may be empty for single-end Illumina data. "
+            "Viralrecon documentation says dashes and spaces in sample names are converted to "
+            "underscores downstream; fastq-sheet-audit itself does not silently rename or normalize "
+            "sample IDs. No biological metadata is inferred or defaulted."
+        ),
+    }
+    data = json.loads(files("fastq_sheet_audit.profile_data").joinpath(
+        "nfcore-viralrecon-3.0.0-illumina.json"
+    ).read_text())
+    assert data == expected
+    assert load_profile("nfcore-viralrecon-3.0.0-illumina") == parse_profile(json.dumps(expected))

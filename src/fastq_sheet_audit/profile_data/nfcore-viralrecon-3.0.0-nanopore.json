@@ -1,0 +1,15 @@
+{
+  "profile_id": "nfcore-viralrecon-3.0.0-nanopore",
+  "display_name": "nf-core/viralrecon 3.0.0 — Nanopore",
+  "pipeline": "nf-core/viralrecon",
+  "verified_version": "3.0.0",
+  "verified_date": "2026-10-03",
+  "source_reference": "Official nf-core/viralrecon 3.0.0 usage documentation: https://nf-co.re/viralrecon/3.0.0/docs/usage/; official tagged input schema: https://github.com/nf-core/viralrecon/blob/3.0.0/assets/schema_input.json",
+  "columns": [
+    {"name": "sample", "value_type": "string", "required_column": true, "required_value": true},
+    {"name": "barcode", "value_type": "integer", "required_column": true, "required_value": true}
+  ],
+  "input_kind": "barcode_mapping",
+  "single_end_supported": null,
+  "notes": "Nanopore-only barcode mapping sheet, not a FASTQ samplesheet. Nanopore FASTQs are supplied separately through viralrecon's Nanopore FASTQ directory layout. Barcode must be an integer. Viralrecon documentation says dashes and spaces in sample names are converted to underscores downstream; fastq-sheet-audit itself does not silently rename or normalize sample IDs. No biological metadata is inferred or defaulted."
+}
