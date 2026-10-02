@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from importlib.resources import files
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -14,8 +15,9 @@ class ProfileColumn:
     name: str
     required_column: bool
     required_value: bool
-    allowed_values: tuple[str, ...] | None = None
-    default_value: str | None = None
+    value_type: Literal["string", "integer"]
+    allowed_values: tuple[str, ...] | tuple[int, ...] | None = None
+    default_value: str | int | None = None
 
 
 @dataclass(frozen=True)
@@ -35,7 +37,7 @@ _PROFILE_FIELDS = {
     "profile_id", "display_name", "pipeline", "verified_version", "verified_date",
     "source_reference", "columns", "single_end_supported", "notes",
 }
-_COLUMN_REQUIRED = {"name", "required_column", "required_value"}
+_COLUMN_REQUIRED = {"name", "required_column", "required_value", "value_type"}
 _COLUMN_FIELDS = _COLUMN_REQUIRED | {"allowed_values", "default_value"}
 _PROFILE_ID = re.compile(r"[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9_-]+)*")
 
@@ -109,17 +111,23 @@ def parse_profile(text: str) -> Profile:
         for flag in ("required_column", "required_value"):
             if type(column[flag]) is not bool:
                 raise ValueError(f"{column['name']}: {flag} must be a boolean")
+        value_type = column["value_type"]
+        if not isinstance(value_type, str) or value_type not in ("string", "integer"):
+            raise ValueError(f"{column['name']}: value_type must be 'string' or 'integer'")
+        expected_type = str if value_type == "string" else int
         allowed = column.get("allowed_values")
         if allowed is not None and (
-            not isinstance(allowed, list) or any(not isinstance(value, str) for value in allowed)
+            not isinstance(allowed, list) or any(type(value) is not expected_type for value in allowed)
         ):
-            raise ValueError(f"{column['name']}: allowed_values must be a string array or null")
+            raise ValueError(f"{column['name']}: allowed_values must be a {value_type} array or null")
         default = column.get("default_value")
-        _string(default, "default_value", nullable=True, empty=True)
+        if default is not None and type(default) is not expected_type:
+            raise ValueError(f"{column['name']}: default_value must be {value_type} or null")
         if allowed is not None and default is not None and default not in allowed:
             raise ValueError(f"{column['name']}: default_value is not in allowed_values")
         columns.append(ProfileColumn(
             column["name"], column["required_column"], column["required_value"],
+            value_type,
             tuple(allowed) if allowed is not None else None, default,
         ))
     return Profile(

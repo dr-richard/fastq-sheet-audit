@@ -203,9 +203,9 @@ def test_smrnaseq_profile_remains_unchanged():
             "https://github.com/nf-core/smrnaseq/blob/2.4.1/assets/schema_input.json"
         ),
         "columns": [
-            {"name": "sample", "required_column": True, "required_value": True},
-            {"name": "fastq_1", "required_column": True, "required_value": True},
-            {"name": "fastq_2", "required_column": False, "required_value": False},
+            {"name": "sample", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_1", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_2", "value_type": "string", "required_column": False, "required_value": False},
         ],
         "single_end_supported": True,
         "notes": (
@@ -269,10 +269,10 @@ def test_methylseq_profile_remains_unchanged():
             "https://github.com/nf-core/methylseq/blob/4.2.0/assets/schema_input.json"
         ),
         "columns": [
-            {"name": "sample", "required_column": True, "required_value": True},
-            {"name": "fastq_1", "required_column": True, "required_value": True},
-            {"name": "fastq_2", "required_column": True, "required_value": False},
-            {"name": "genome", "required_column": True, "required_value": False},
+            {"name": "sample", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_1", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_2", "value_type": "string", "required_column": True, "required_value": False},
+            {"name": "genome", "value_type": "string", "required_column": True, "required_value": False},
         ],
         "single_end_supported": True,
         "notes": "Core portable samplesheet contract only. The fastq_2 and genome columns are required but their values may be empty. No genome or biological metadata is inferred or defaulted.",
@@ -329,10 +329,10 @@ def test_rnaseq_profile_remains_unchanged():
             "https://github.com/nf-core/rnaseq/blob/3.27.0/assets/schema_input.json"
         ),
         "columns": [
-            {"name": "sample", "required_column": True, "required_value": True},
-            {"name": "fastq_1", "required_column": True, "required_value": True},
-            {"name": "fastq_2", "required_column": True, "required_value": False},
-            {"name": "strandedness", "required_column": True, "required_value": True,
+            {"name": "sample", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_1", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_2", "value_type": "string", "required_column": True, "required_value": False},
+            {"name": "strandedness", "value_type": "string", "required_column": True, "required_value": True,
              "allowed_values": ["forward", "reverse", "unstranded", "auto"], "default_value": None},
         ],
         "single_end_supported": True,
@@ -387,9 +387,9 @@ def test_generic_profile_remains_unchanged():
         "verified_date": None,
         "source_reference": "fastq-sheet-audit generic export specification",
         "columns": [
-            {"name": "sample", "required_column": True, "required_value": True},
-            {"name": "r1", "required_column": True, "required_value": True},
-            {"name": "r2", "required_column": False, "required_value": False},
+            {"name": "sample", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "r1", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "r2", "value_type": "string", "required_column": False, "required_value": False},
         ],
         "single_end_supported": True,
         "notes": "Conservative generic export; no pipeline compatibility claim. R2 may be omitted or empty for single-end data.",
@@ -403,4 +403,78 @@ def test_dotted_profile_id_validation_rejects_unsafe_ids(profile_id):
     data = generic_data()
     data["profile_id"] = profile_id
     with pytest.raises(ValueError, match="invalid profile_id"):
+        parse_profile(json.dumps(data))
+
+
+@pytest.mark.parametrize("profile_id", list_profile_ids())
+def test_every_bundled_column_declares_string_type(profile_id):
+    data = json.loads(files("fastq_sheet_audit.profile_data").joinpath(
+        profile_id + ".json"
+    ).read_text())
+    assert all(column["value_type"] == "string" for column in data["columns"])
+    assert all(column.value_type == "string" for column in load_profile(profile_id).columns)
+
+
+@pytest.mark.parametrize("value_type, allowed, default", [
+    ("string", ["A", "B"], "A"),
+    ("string", ["", " α "], ""),
+    ("integer", [0, 1, -2], 0),
+    ("integer", [1, 2], 2),
+    ("integer", None, None),
+    ("integer", None, -3),
+])
+def test_typed_values_load_immutably(value_type, allowed, default):
+    data = generic_data()
+    data["columns"][0].update(value_type=value_type, allowed_values=allowed, default_value=default)
+    column = parse_profile(json.dumps(data)).columns[0]
+    assert column.value_type == value_type
+    assert column.allowed_values == (tuple(allowed) if allowed is not None else None)
+    assert column.default_value == default
+    assert type(column.default_value) is type(default)
+    with pytest.raises(FrozenInstanceError):
+        column.value_type = "integer"
+
+
+@pytest.mark.parametrize("value_type, field, value", [
+    ("string", "allowed_values", [1]),
+    ("string", "allowed_values", [True]),
+    ("string", "default_value", 1),
+    ("string", "default_value", False),
+    ("integer", "allowed_values", [True]),
+    ("integer", "allowed_values", [1, False]),
+    ("integer", "allowed_values", [1.0]),
+    ("integer", "allowed_values", ["1"]),
+    ("integer", "allowed_values", "1"),
+    ("integer", "default_value", True),
+    ("integer", "default_value", False),
+    ("integer", "default_value", 1.0),
+    ("integer", "default_value", "1"),
+])
+def test_wrong_typed_values_rejected(value_type, field, value):
+    data = generic_data()
+    data["columns"][0].update(value_type=value_type)
+    data["columns"][0][field] = value
+    with pytest.raises(ValueError, match=field):
+        parse_profile(json.dumps(data))
+
+
+def test_integer_default_must_be_allowed():
+    data = generic_data()
+    data["columns"][0].update(value_type="integer", allowed_values=[1, 2], default_value=3)
+    with pytest.raises(ValueError, match="not in allowed_values"):
+        parse_profile(json.dumps(data))
+
+
+@pytest.mark.parametrize("value_type", ["float", "STRING", "", None, True, 1, [], {}])
+def test_unknown_or_nonstring_value_type_rejected(value_type):
+    data = generic_data()
+    data["columns"][0]["value_type"] = value_type
+    with pytest.raises(ValueError, match="value_type"):
+        parse_profile(json.dumps(data))
+
+
+def test_missing_value_type_rejected():
+    data = generic_data()
+    del data["columns"][0]["value_type"]
+    with pytest.raises(ValueError, match="missing fields: value_type"):
         parse_profile(json.dumps(data))
