@@ -17,6 +17,7 @@
       "default_value": null
     }
   ],
+  "input_kind": "fastq_samplesheet",
   "single_end_supported": true,
   "notes": "Core portable samplesheet contract only. The fastq_2 column is required but may have empty values for single-end data. Strandedness must be supplied explicitly; no biological metadata is inferred or defaulted."
 }

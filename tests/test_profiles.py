@@ -207,6 +207,7 @@ def test_smrnaseq_profile_remains_unchanged():
             {"name": "fastq_1", "value_type": "string", "required_column": True, "required_value": True},
             {"name": "fastq_2", "value_type": "string", "required_column": False, "required_value": False},
         ],
+        "input_kind": "fastq_samplesheet",
         "single_end_supported": True,
         "notes": (
             "Pipeline documentation says R2 may be supplied, but downstream small-RNA processing "
@@ -274,6 +275,7 @@ def test_methylseq_profile_remains_unchanged():
             {"name": "fastq_2", "value_type": "string", "required_column": True, "required_value": False},
             {"name": "genome", "value_type": "string", "required_column": True, "required_value": False},
         ],
+        "input_kind": "fastq_samplesheet",
         "single_end_supported": True,
         "notes": "Core portable samplesheet contract only. The fastq_2 and genome columns are required but their values may be empty. No genome or biological metadata is inferred or defaulted.",
     }
@@ -335,6 +337,7 @@ def test_rnaseq_profile_remains_unchanged():
             {"name": "strandedness", "value_type": "string", "required_column": True, "required_value": True,
              "allowed_values": ["forward", "reverse", "unstranded", "auto"], "default_value": None},
         ],
+        "input_kind": "fastq_samplesheet",
         "single_end_supported": True,
         "notes": "Core portable samplesheet contract only. The fastq_2 column is required but may have empty values for single-end data. Strandedness must be supplied explicitly; no biological metadata is inferred or defaulted.",
     }
@@ -391,6 +394,7 @@ def test_generic_profile_remains_unchanged():
             {"name": "r1", "value_type": "string", "required_column": True, "required_value": True},
             {"name": "r2", "value_type": "string", "required_column": False, "required_value": False},
         ],
+        "input_kind": "fastq_samplesheet",
         "single_end_supported": True,
         "notes": "Conservative generic export; no pipeline compatibility claim. R2 may be omitted or empty for single-end data.",
     }
@@ -477,4 +481,70 @@ def test_missing_value_type_rejected():
     data = generic_data()
     del data["columns"][0]["value_type"]
     with pytest.raises(ValueError, match="missing fields: value_type"):
+        parse_profile(json.dumps(data))
+
+
+@pytest.mark.parametrize("profile_id", list_profile_ids())
+def test_bundled_input_kind_and_single_end_support(profile_id):
+    data = json.loads(files("fastq_sheet_audit.profile_data").joinpath(
+        profile_id + ".json"
+    ).read_text())
+    assert data["input_kind"] == "fastq_samplesheet"
+    assert data["single_end_supported"] is True
+    profile = load_profile(profile_id)
+    assert profile.input_kind == "fastq_samplesheet"
+    assert profile.single_end_supported is True
+    with pytest.raises(FrozenInstanceError):
+        profile.input_kind = "barcode_mapping"
+
+
+def test_barcode_mapping_accepts_null_single_end_support():
+    data = generic_data()
+    data.update(input_kind="barcode_mapping", single_end_supported=None)
+    data["columns"] = [
+        {"name": "sample", "required_column": True, "required_value": True, "value_type": "string"},
+        {"name": "barcode", "required_column": True, "required_value": True, "value_type": "integer"},
+    ]
+    profile = parse_profile(json.dumps(data))
+    assert profile.input_kind == "barcode_mapping"
+    assert profile.single_end_supported is None
+    assert [column.name for column in profile.columns] == ["sample", "barcode"]
+
+
+@pytest.mark.parametrize("value", [True, False, 0, 1, "true", "null", [], {}])
+def test_barcode_mapping_rejects_nonnull_single_end_support(value):
+    data = generic_data()
+    data.update(input_kind="barcode_mapping", single_end_supported=value)
+    with pytest.raises(ValueError, match="single_end_supported must be null"):
+        parse_profile(json.dumps(data))
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", "false", [], {}])
+def test_fastq_samplesheet_rejects_nonboolean_single_end_support(value):
+    data = generic_data()
+    data["single_end_supported"] = value
+    with pytest.raises(ValueError, match="single_end_supported must be a boolean"):
+        parse_profile(json.dumps(data))
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_fastq_samplesheet_accepts_both_boolean_values(value):
+    data = generic_data()
+    data["single_end_supported"] = value
+    profile = parse_profile(json.dumps(data))
+    assert profile.single_end_supported is value
+
+
+@pytest.mark.parametrize("value", ["unknown", "FASTQ_SAMPLESHEET", "", None, True, 1, [], {}])
+def test_unknown_or_nonstring_input_kind_rejected(value):
+    data = generic_data()
+    data["input_kind"] = value
+    with pytest.raises(ValueError, match="input_kind"):
+        parse_profile(json.dumps(data))
+
+
+def test_missing_input_kind_rejected():
+    data = generic_data()
+    del data["input_kind"]
+    with pytest.raises(ValueError, match="missing fields: input_kind"):
         parse_profile(json.dumps(data))

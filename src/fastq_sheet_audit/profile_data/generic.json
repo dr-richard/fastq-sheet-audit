@@ -10,6 +10,7 @@
     {"name": "r1", "value_type": "string", "required_column": true, "required_value": true},
     {"name": "r2", "value_type": "string", "required_column": false, "required_value": false}
   ],
+  "input_kind": "fastq_samplesheet",
   "single_end_supported": true,
   "notes": "Conservative generic export; no pipeline compatibility claim. R2 may be omitted or empty for single-end data."
 }

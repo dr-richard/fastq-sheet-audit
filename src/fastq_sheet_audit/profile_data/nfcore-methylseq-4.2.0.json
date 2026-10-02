@@ -11,6 +11,7 @@
     {"name": "fastq_2", "value_type": "string", "required_column": true, "required_value": false},
     {"name": "genome", "value_type": "string", "required_column": true, "required_value": false}
   ],
+  "input_kind": "fastq_samplesheet",
   "single_end_supported": true,
   "notes": "Core portable samplesheet contract only. The fastq_2 and genome columns are required but their values may be empty. No genome or biological metadata is inferred or defaulted."
 }

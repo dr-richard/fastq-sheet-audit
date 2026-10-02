@@ -29,13 +29,14 @@ class Profile:
     verified_date: str | None
     source_reference: str
     columns: tuple[ProfileColumn, ...]
-    single_end_supported: bool
+    input_kind: Literal["fastq_samplesheet", "barcode_mapping"]
+    single_end_supported: bool | None
     notes: str
 
 
 _PROFILE_FIELDS = {
     "profile_id", "display_name", "pipeline", "verified_version", "verified_date",
-    "source_reference", "columns", "single_end_supported", "notes",
+    "source_reference", "columns", "input_kind", "single_end_supported", "notes",
 }
 _COLUMN_REQUIRED = {"name", "required_column", "required_value", "value_type"}
 _COLUMN_FIELDS = _COLUMN_REQUIRED | {"allowed_values", "default_value"}
@@ -95,8 +96,14 @@ def parse_profile(text: str) -> Profile:
         if parsed_date.isoformat() != data["verified_date"]:
             raise ValueError("verified_date must be YYYY-MM-DD or null")
     _string(data["notes"], "notes", empty=True)
-    if type(data["single_end_supported"]) is not bool:
-        raise ValueError("single_end_supported must be a boolean")
+    input_kind = data["input_kind"]
+    if not isinstance(input_kind, str) or input_kind not in ("fastq_samplesheet", "barcode_mapping"):
+        raise ValueError("input_kind must be 'fastq_samplesheet' or 'barcode_mapping'")
+    if input_kind == "fastq_samplesheet":
+        if type(data["single_end_supported"]) is not bool:
+            raise ValueError("fastq_samplesheet single_end_supported must be a boolean")
+    elif data["single_end_supported"] is not None:
+        raise ValueError("barcode_mapping single_end_supported must be null")
     if not isinstance(data["columns"], list) or not data["columns"]:
         raise ValueError("columns must be a nonempty array")
 
@@ -133,7 +140,7 @@ def parse_profile(text: str) -> Profile:
     return Profile(
         data["profile_id"], data["display_name"], data["pipeline"],
         data["verified_version"], data["verified_date"], data["source_reference"],
-        tuple(columns), data["single_end_supported"], data["notes"],
+        tuple(columns), input_kind, data["single_end_supported"], data["notes"],
     )
 
 
