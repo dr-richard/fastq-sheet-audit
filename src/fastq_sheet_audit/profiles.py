@@ -37,7 +37,7 @@ _PROFILE_FIELDS = {
 }
 _COLUMN_REQUIRED = {"name", "required_column", "required_value"}
 _COLUMN_FIELDS = _COLUMN_REQUIRED | {"allowed_values", "default_value"}
-_PROFILE_ID = re.compile(r"[a-z0-9][a-z0-9_-]*")
+_PROFILE_ID = re.compile(r"[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9_-]+)*")
 
 
 def _fields(value: object, required: set[str], allowed: set[str], label: str) -> None:

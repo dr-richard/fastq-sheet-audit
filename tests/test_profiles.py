@@ -124,7 +124,7 @@ def test_invalid_column_types(field, value):
 
 
 def test_deterministic_listing():
-    assert list_profile_ids() == ("generic",)
+    assert list_profile_ids() == ("generic", "nfcore-rnaseq-3.27.0")
     assert list_profile_ids() == list_profile_ids()
 
 
@@ -140,3 +140,65 @@ def test_offline_loading(monkeypatch):
 
     monkeypatch.setattr("socket.socket", fail)
     assert load_profile("generic").profile_id == "generic"
+    assert load_profile("nfcore-rnaseq-3.27.0").profile_id == "nfcore-rnaseq-3.27.0"
+
+
+def test_load_nfcore_rnaseq_metadata():
+    profile = load_profile("nfcore-rnaseq-3.27.0")
+    assert profile.profile_id == "nfcore-rnaseq-3.27.0"
+    assert profile.display_name == "nf-core/rnaseq 3.27.0"
+    assert profile.pipeline == "nf-core/rnaseq"
+    assert profile.verified_version == "3.27.0"
+    assert profile.verified_date == "2026-10-03"
+    assert profile.source_reference == (
+        "Official nf-core/rnaseq 3.27.0 usage documentation: "
+        "https://nf-co.re/rnaseq/3.27.0/docs/usage/; official tagged input schema: "
+        "https://github.com/nf-core/rnaseq/blob/3.27.0/assets/schema_input.json"
+    )
+    assert profile.single_end_supported is True
+
+
+def test_nfcore_rnaseq_core_column_contract():
+    profile = load_profile("nfcore-rnaseq-3.27.0")
+    assert [column.name for column in profile.columns] == [
+        "sample", "fastq_1", "fastq_2", "strandedness",
+    ]
+    assert [(column.required_column, column.required_value) for column in profile.columns] == [
+        (True, True), (True, True), (True, False), (True, True),
+    ]
+    assert profile.columns[3].allowed_values == ("forward", "reverse", "unstranded", "auto")
+    assert profile.columns[3].default_value is None
+    assert all(column.default_value is None for column in profile.columns)
+    assert all(column.allowed_values is None for column in profile.columns[:3])
+    data = json.loads(files("fastq_sheet_audit.profile_data").joinpath(
+        "nfcore-rnaseq-3.27.0.json"
+    ).read_text())
+    assert data["columns"][3]["default_value"] is None
+
+
+def test_generic_profile_remains_unchanged():
+    expected = {
+        "profile_id": "generic",
+        "display_name": "Generic FASTQ sheet",
+        "pipeline": None,
+        "verified_version": None,
+        "verified_date": None,
+        "source_reference": "fastq-sheet-audit generic export specification",
+        "columns": [
+            {"name": "sample", "required_column": True, "required_value": True},
+            {"name": "r1", "required_column": True, "required_value": True},
+            {"name": "r2", "required_column": False, "required_value": False},
+        ],
+        "single_end_supported": True,
+        "notes": "Conservative generic export; no pipeline compatibility claim. R2 may be omitted or empty for single-end data.",
+    }
+    assert generic_data() == expected
+    assert load_profile("generic") == parse_profile(json.dumps(expected))
+
+
+@pytest.mark.parametrize("profile_id", ["../generic", "generic/1.0", "generic\\1.0", "generic..1", "generic."])
+def test_dotted_profile_id_validation_rejects_unsafe_ids(profile_id):
+    data = generic_data()
+    data["profile_id"] = profile_id
+    with pytest.raises(ValueError, match="invalid profile_id"):
+        parse_profile(json.dumps(data))
