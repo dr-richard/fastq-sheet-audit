@@ -1,0 +1,15 @@
+{
+  "profile_id": "nfcore-smrnaseq-2.4.1",
+  "display_name": "nf-core/smrnaseq 2.4.1",
+  "pipeline": "nf-core/smrnaseq",
+  "verified_version": "2.4.1",
+  "verified_date": "2026-10-03",
+  "source_reference": "Official nf-core/smrnaseq 2.4.1 usage documentation: https://nf-co.re/smrnaseq/2.4.1/docs/usage/; official tagged input schema: https://github.com/nf-core/smrnaseq/blob/2.4.1/assets/schema_input.json",
+  "columns": [
+    {"name": "sample", "required_column": true, "required_value": true},
+    {"name": "fastq_1", "required_column": true, "required_value": true},
+    {"name": "fastq_2", "required_column": false, "required_value": false}
+  ],
+  "single_end_supported": true,
+  "notes": "Pipeline documentation says R2 may be supplied, but downstream small-RNA processing primarily uses R1. This profile is declarative metadata only; fastq-sheet-audit does not silently discard R2. No biological metadata is inferred or defaulted."
+}
