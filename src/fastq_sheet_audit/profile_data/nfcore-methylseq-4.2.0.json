@@ -1,0 +1,16 @@
+{
+  "profile_id": "nfcore-methylseq-4.2.0",
+  "display_name": "nf-core/methylseq 4.2.0",
+  "pipeline": "nf-core/methylseq",
+  "verified_version": "4.2.0",
+  "verified_date": "2026-10-03",
+  "source_reference": "Official nf-core/methylseq 4.2.0 usage documentation: https://nf-co.re/methylseq/4.2.0/docs/usage/; official tagged input schema: https://github.com/nf-core/methylseq/blob/4.2.0/assets/schema_input.json",
+  "columns": [
+    {"name": "sample", "required_column": true, "required_value": true},
+    {"name": "fastq_1", "required_column": true, "required_value": true},
+    {"name": "fastq_2", "required_column": true, "required_value": false},
+    {"name": "genome", "required_column": true, "required_value": false}
+  ],
+  "single_end_supported": true,
+  "notes": "Core portable samplesheet contract only. The fastq_2 and genome columns are required but their values may be empty. No genome or biological metadata is inferred or defaulted."
+}

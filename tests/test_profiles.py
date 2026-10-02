@@ -124,7 +124,7 @@ def test_invalid_column_types(field, value):
 
 
 def test_deterministic_listing():
-    assert list_profile_ids() == ("generic", "nfcore-rnaseq-3.27.0")
+    assert list_profile_ids() == ("generic", "nfcore-methylseq-4.2.0", "nfcore-rnaseq-3.27.0")
     assert list_profile_ids() == list_profile_ids()
 
 
@@ -141,6 +141,68 @@ def test_offline_loading(monkeypatch):
     monkeypatch.setattr("socket.socket", fail)
     assert load_profile("generic").profile_id == "generic"
     assert load_profile("nfcore-rnaseq-3.27.0").profile_id == "nfcore-rnaseq-3.27.0"
+    assert load_profile("nfcore-methylseq-4.2.0").profile_id == "nfcore-methylseq-4.2.0"
+
+
+def test_load_nfcore_methylseq_metadata():
+    profile = load_profile("nfcore-methylseq-4.2.0")
+    assert profile.profile_id == "nfcore-methylseq-4.2.0"
+    assert profile.display_name == "nf-core/methylseq 4.2.0"
+    assert profile.pipeline == "nf-core/methylseq"
+    assert profile.verified_version == "4.2.0"
+    assert profile.verified_date == "2026-10-03"
+    assert profile.source_reference == (
+        "Official nf-core/methylseq 4.2.0 usage documentation: "
+        "https://nf-co.re/methylseq/4.2.0/docs/usage/; official tagged input schema: "
+        "https://github.com/nf-core/methylseq/blob/4.2.0/assets/schema_input.json"
+    )
+    assert profile.single_end_supported is True
+
+
+def test_nfcore_methylseq_core_column_contract():
+    profile = load_profile("nfcore-methylseq-4.2.0")
+    assert [column.name for column in profile.columns] == [
+        "sample", "fastq_1", "fastq_2", "genome",
+    ]
+    assert [(column.required_column, column.required_value) for column in profile.columns] == [
+        (True, True), (True, True), (True, False), (True, False),
+    ]
+    assert all(column.default_value is None for column in profile.columns)
+    assert all(column.allowed_values is None for column in profile.columns)
+    data = json.loads(files("fastq_sheet_audit.profile_data").joinpath(
+        "nfcore-methylseq-4.2.0.json"
+    ).read_text())
+    assert all("default_value" not in column and "allowed_values" not in column
+               for column in data["columns"])
+
+
+def test_rnaseq_profile_remains_unchanged():
+    expected = {
+        "profile_id": "nfcore-rnaseq-3.27.0",
+        "display_name": "nf-core/rnaseq 3.27.0",
+        "pipeline": "nf-core/rnaseq",
+        "verified_version": "3.27.0",
+        "verified_date": "2026-10-03",
+        "source_reference": (
+            "Official nf-core/rnaseq 3.27.0 usage documentation: "
+            "https://nf-co.re/rnaseq/3.27.0/docs/usage/; official tagged input schema: "
+            "https://github.com/nf-core/rnaseq/blob/3.27.0/assets/schema_input.json"
+        ),
+        "columns": [
+            {"name": "sample", "required_column": True, "required_value": True},
+            {"name": "fastq_1", "required_column": True, "required_value": True},
+            {"name": "fastq_2", "required_column": True, "required_value": False},
+            {"name": "strandedness", "required_column": True, "required_value": True,
+             "allowed_values": ["forward", "reverse", "unstranded", "auto"], "default_value": None},
+        ],
+        "single_end_supported": True,
+        "notes": "Core portable samplesheet contract only. The fastq_2 column is required but may have empty values for single-end data. Strandedness must be supplied explicitly; no biological metadata is inferred or defaulted.",
+    }
+    data = json.loads(files("fastq_sheet_audit.profile_data").joinpath(
+        "nfcore-rnaseq-3.27.0.json"
+    ).read_text())
+    assert data == expected
+    assert load_profile("nfcore-rnaseq-3.27.0") == parse_profile(json.dumps(expected))
 
 
 def test_load_nfcore_rnaseq_metadata():
