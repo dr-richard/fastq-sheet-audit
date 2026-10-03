@@ -122,6 +122,13 @@ class FakeTable:
         self.events = events
         self.selected = ()
         self.identities = []
+        self.options = {}
+    def configure(self, **kwargs):
+        self.options.update(kwargs)
+    def heading(self, key, **kwargs):
+        pass
+    def column(self, key, **kwargs):
+        pass
     def get_children(self):
         return tuple(range(len(self.rows)))
     def delete(self, *children):
@@ -154,7 +161,173 @@ def fake_application():
         session_state={}, r1_selection=FakeVariable("Automatic"), r2_selection=FakeVariable("Automatic"),
         confirmation=FakeVariable(False), r1_box=Mock(), r2_box=Mock(),
         confirmation_check=Mock(), apply_button=Mock(), reset_button=Mock(),
+        profile=FakeVariable(""), profile_box=Mock(), path_mode=FakeVariable(""), path_mode_box=Mock(),
+        target_style=FakeVariable(""), target_style_box=Mock(), target_root=FakeVariable(""),
+        target_root_entry=Mock(), profile_notes=FakeVariable(""), manual_fields=FakeVariable(""),
+        preview_button=Mock(), output_preview=FakeTable(events), validation_preview=FakeTable(events),
+        export_state={},
     )
+
+
+def export_application(*, ready=True):
+    application = fake_application()
+    session = SimpleNamespace(snapshot=SimpleNamespace(ready_for_export=ready))
+    application.session_state.update(session=session, signature=gui.audit_input_signature(application))
+    gui.refresh_export_controls(application)
+    return application
+
+
+@pytest.mark.parametrize("ready", [True, False])
+def test_export_controls_profiles_and_initial_disable(ready):
+    from fastq_sheet_audit.gui_controller import export_profile_views
+    application = fake_application()
+    gui.invalidate_audit_session(application)
+    application.preview_button.configure.assert_called_with(state="disabled")
+    application = export_application(ready=ready)
+    application.profile_box.configure.assert_called_with(
+        values=tuple(profile.profile_id for profile in export_profile_views()),
+        state="readonly" if ready else "disabled")
+    assert application.profile.get() == ""
+    assert application.path_mode.get() == "Relative to FASTQ root"
+    application.preview_button.configure.assert_called_with(state="normal" if ready else "disabled")
+    application.export_button.configure.assert_called_with(state="disabled")
+
+
+@pytest.mark.parametrize("profile_id,manual", [
+    ("generic", "none"), ("nfcore-rnaseq-3.27.0", "strandedness"),
+    ("nfcore-methylseq-4.2.0", "genome"), ("nfcore-viralrecon-3.0.0-nanopore", "barcode"),
+])
+def test_profile_notes_and_declarative_manual_summary(profile_id, manual):
+    application = export_application()
+    application.profile.set(profile_id)
+    gui.profile_selection_action(application)
+    profile = next(p for p in application.export_state["profiles"] if p.profile_id == profile_id)
+    assert application.profile_notes.get() == profile.notes
+    assert application.manual_fields.get() == f"Manual fields: {manual}"
+    application.profile.set("unknown")
+    gui.profile_selection_action(application)
+    assert application.profile_notes.get() == application.manual_fields.get() == ""
+
+
+def test_path_mode_controls_and_clearing():
+    application = export_application()
+    application.path_mode.set("Rebased root")
+    gui.path_mode_action(application)
+    application.target_root_entry.configure.assert_called_with(state="normal")
+    application.target_style_box.configure.assert_called_with(state="readonly")
+    assert application.target_style.get() == ""
+    application.target_root.set("D:\\Unicode α")
+    application.target_style.set("Windows")
+    application.export_state["plan"] = object()
+    for mode in ("Local absolute", "Relative to FASTQ root"):
+        application.path_mode.set(mode)
+        gui.path_mode_action(application)
+        assert application.target_root.get() == application.target_style.get() == ""
+        application.target_root_entry.configure.assert_called_with(state="disabled")
+        application.target_style_box.configure.assert_called_with(state="disabled")
+    assert "plan" not in application.export_state
+
+
+def preview_plan(findings=(), headers=("sample", "r1")):
+    from fastq_sheet_audit.sheet import SampleSheet, SheetRow
+    from fastq_sheet_audit.profile_validation import ProfileValidationResult
+    sheet = SampleSheet(headers, (SheetRow(7, (" α =value ", "01")), SheetRow(3, ("+2", "@path"))))
+    return SimpleNamespace(plan=SimpleNamespace(result=SimpleNamespace(
+        sheet=sheet, validation=ProfileValidationResult("generic", findings))))
+
+
+@pytest.mark.parametrize("with_findings", [False, True])
+def test_preview_exact_options_rendering_status_and_dynamic_columns(monkeypatch, with_findings):
+    from fastq_sheet_audit import gui_controller
+    from fastq_sheet_audit.profile_validation import ProfileFinding
+    application = export_application()
+    application.profile.set("generic")
+    application.path_mode.set("Rebased root")
+    application.target_root.set("D:\\ α ")
+    application.target_style.set("Windows")
+    findings = (ProfileFinding("EMPTY_REQUIRED_VALUE", "exact message", 7, "manual", ""),
+                ProfileFinding("OTHER", "second", None, None, None)) if with_findings else ()
+    plan = preview_plan(findings)
+    planner = Mock(return_value=plan)
+    monkeypatch.setattr(gui_controller, "plan_session_export", planner)
+    gui.preview_export_action(application)
+    session = application.session_state["session"]
+    planner.assert_called_once_with(session, "generic", "Rebased root", target_root="D:\\ α ",
+                                   target_style_label="Windows", explicit_values=None)
+    assert application.export_state["plan"] is plan
+    assert application.export_state["signature"] == (session, "generic", "Rebased root", "D:\\ α ", "Windows")
+    assert application.output_preview.options["columns"] == ("sample", "r1")
+    assert application.output_preview.rows == [(" α =value ", "01"), ("+2", "@path")]
+    assert application.validation_preview.rows == ([
+        ("EMPTY_REQUIRED_VALUE", 7, "manual", "", "exact message"), ("OTHER", "", "", "", "second")
+    ] if with_findings else [])
+    assert application.status.get() == ("Export preview has 2 profile validation finding(s)." if with_findings else
+                                        "Export preview valid. File writing is not enabled yet.")
+    planner.return_value = preview_plan(headers=("different", "headers"))
+    gui.preview_export_action(application)
+    assert application.output_preview.options["columns"] == ("different", "headers")
+    assert len(application.output_preview.rows) == 2
+    application.export_button.configure.assert_called_with(state="disabled")
+
+
+@pytest.mark.parametrize("changed", ["fastq_directory", "sample_sheet", "read_mode", "mapping"])
+def test_stale_inputs_refuse_export_preview(monkeypatch, changed):
+    from fastq_sheet_audit import gui_controller
+    application = export_application()
+    application.profile.set("generic")
+    if changed == "mapping":
+        application.mapping_variables[0][1].set("Unassigned")
+    else:
+        getattr(application, changed).set("changed")
+    planner = Mock()
+    monkeypatch.setattr(gui_controller, "plan_session_export", planner)
+    gui.preview_export_action(application)
+    planner.assert_not_called()
+    assert application.status.get() == "Export preview failed: Inputs changed. Run Audit again before planning export."
+
+
+@pytest.mark.parametrize("error", [ValueError("barcode_mapping unsupported"), OSError("bad path"), RuntimeError("bug")])
+def test_preview_failure_clears_plan_and_preserves_exception_boundary(monkeypatch, error):
+    from fastq_sheet_audit import gui_controller
+    application = export_application()
+    application.profile.set("nfcore-viralrecon-3.0.0-nanopore")
+    application.export_state["plan"] = object()
+    monkeypatch.setattr(gui_controller, "plan_session_export", Mock(side_effect=error))
+    if isinstance(error, RuntimeError):
+        with pytest.raises(RuntimeError):
+            gui.preview_export_action(application)
+    else:
+        gui.preview_export_action(application)
+        assert application.status.get() == f"Export preview failed: {error}"
+    assert "plan" not in application.export_state
+    assert application.output_preview.rows == application.validation_preview.rows == []
+
+
+def test_session_invalidation_clears_export_evidence():
+    application = export_application()
+    application.export_state.update(plan=object(), signature=object())
+    gui.clear_column_mapping(application)
+    assert application.export_state == {}
+    assert application.output_preview.rows == application.validation_preview.rows == []
+    application.preview_button.configure.assert_called_with(state="disabled")
+
+
+@pytest.mark.parametrize("reset", [False, True])
+@pytest.mark.parametrize("ready", [False, True])
+def test_pair_action_invalidates_preview_and_refreshes_readiness(monkeypatch, reset, ready):
+    from fastq_sheet_audit import gui_controller
+    application = fake_application()
+    attach_session(application, editor_session(), monkeypatch)
+    gui.load_pair_editor(application, 0)
+    application.export_state["plan"] = object()
+    new = editor_session()
+    new.snapshot.ready_for_export = ready
+    monkeypatch.setattr(gui_controller, "apply_pair_adjudication", Mock(return_value=new))
+    (gui.reset_pair_action if reset else gui.apply_pair_action)(application)
+    assert "plan" not in application.export_state
+    assert application.output_preview.rows == application.validation_preview.rows == []
+    application.preview_button.configure.assert_called_with(state="normal" if ready else "disabled")
+    application.export_button.configure.assert_called_with(state="disabled")
 
 
 def test_render_clears_tables_updates_summary_and_preserves_order():
@@ -217,7 +390,8 @@ def test_audit_callback_success_and_unexpected_error_boundary(monkeypatch):
     from fastq_sheet_audit.presentation import SummaryView, WorkflowView
     application = fake_application()
     view = WorkflowView(SummaryView(2, 0, 0, 0, True), (), (), ())
-    monkeypatch.setattr(gui_controller, "audit_session", Mock(return_value=SimpleNamespace(view=view)))
+    monkeypatch.setattr(gui_controller, "audit_session", Mock(return_value=SimpleNamespace(
+        view=view, snapshot=SimpleNamespace(ready_for_export=True))))
     gui.audit_action(application)
     assert application.status.get() == "Audit complete: 2 FASTQs, 0 errors, 0 warnings."
     assert dict(application.summary_values)["ready_for_export"].get() == "Ready"
@@ -297,7 +471,8 @@ def test_audit_passes_exact_mapping_overrides(tmp_path, monkeypatch):
     variables[ColumnRole.SAMPLE].set("[1] sampleid")
     variables[ColumnRole.R1].set("Automatic")
     variables[ColumnRole.R2].set("Unassigned")
-    audit = Mock(return_value=SimpleNamespace(view=WorkflowView(SummaryView(0, 0, 0, 0, True), (), (), ())))
+    audit = Mock(return_value=SimpleNamespace(view=WorkflowView(SummaryView(0, 0, 0, 0, True), (), (), ()),
+                                            snapshot=SimpleNamespace(ready_for_export=True)))
     monkeypatch.setattr(gui_controller, "audit_session", audit)
     gui.audit_action(application)
     assert audit.call_args.kwargs["overrides"] == {ColumnRole.SAMPLE: 1, ColumnRole.R2: None}
@@ -323,7 +498,8 @@ def editor_session(*, selected="Automatic", confirmed=False):
             PairCandidateChoice(0, "B_R1.fastq", "[0] B_R1.fastq"),
         ), (), "[0] B_R1.fastq", "Unassigned", False, True),
     )
-    return SimpleNamespace(view=WorkflowView(SummaryView(4, 0, 1, 1, False), (), (), rows), editors=views)
+    return SimpleNamespace(view=WorkflowView(SummaryView(4, 0, 1, 1, False), (), (), rows), editors=views,
+                           snapshot=SimpleNamespace(ready_for_export=False))
 
 
 def attach_session(application, session, monkeypatch):
@@ -433,6 +609,8 @@ def test_browse_invalidation_only_after_selection(monkeypatch, sample):
     session = editor_session()
     attach_session(application, session, monkeypatch)
     gui.load_pair_editor(application, 0)
+    plan = object()
+    application.export_state["plan"] = plan
     chooser = Mock(return_value="")
     dialogs = SimpleNamespace(askdirectory=chooser, askopenfilename=chooser)
     monkeypatch.setitem(sys.modules, "tkinter", SimpleNamespace(filedialog=dialogs))
@@ -441,9 +619,11 @@ def test_browse_invalidation_only_after_selection(monkeypatch, sample):
     callback = (lambda: gui.clear_column_mapping(application)) if sample else (lambda: gui.invalidate_audit_session(application))
     browse(variable, on_selected=callback)
     assert application.session_state["session"] is session
+    assert application.export_state["plan"] is plan
     chooser.return_value = "new path"
     browse(variable, on_selected=callback)
     assert application.session_state == {}
+    assert "plan" not in application.export_state
     application.apply_button.configure.assert_called_with(state="disabled")
 
 
@@ -453,13 +633,17 @@ def test_failed_audit_discards_session_and_success_starts_new_session(monkeypatc
     old = editor_session()
     attach_session(application, old, monkeypatch)
     gui.load_pair_editor(application, 0)
+    application.export_state["plan"] = object()
     monkeypatch.setattr(gui_controller, "audit_session", Mock(side_effect=ValueError("bad input")))
     gui.audit_action(application)
     assert application.session_state == {}
+    assert "plan" not in application.export_state
     application.apply_button.configure.assert_called_with(state="disabled")
     new = editor_session()
     monkeypatch.setattr(gui_controller, "audit_session", Mock(return_value=new))
+    application.export_state["plan"] = object()
     gui.audit_action(application)
+    assert "plan" not in application.export_state
     assert application.session_state["session"] is new
     assert application.session_state["signature"] == gui.audit_input_signature(application)
     assert "pair_index" not in application.session_state

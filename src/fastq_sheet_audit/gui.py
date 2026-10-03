@@ -1,4 +1,4 @@
-"""Native read-only audit and adjudication GUI; export is not connected.
+"""Native audit, adjudication, and export-preview GUI; file writing is disabled.
 
 Manual smoke command: python -m fastq_sheet_audit.gui
 """
@@ -81,6 +81,113 @@ class ApplicationWindow:
     confirmation_check: Any = None
     apply_button: Any = None
     reset_button: Any = None
+    profile: Any = None
+    profile_box: Any = None
+    path_mode: Any = None
+    path_mode_box: Any = None
+    target_style: Any = None
+    target_style_box: Any = None
+    target_root: Any = None
+    target_root_entry: Any = None
+    profile_notes: Any = None
+    manual_fields: Any = None
+    preview_button: Any = None
+    output_preview: Any = None
+    validation_preview: Any = None
+    export_state: dict = field(default_factory=dict)
+
+
+def invalidate_export_preview(application: ApplicationWindow) -> None:
+    application.export_state.pop("plan", None)
+    application.export_state.pop("signature", None)
+    for table in (application.output_preview, application.validation_preview):
+        children = table.get_children()
+        if children:
+            table.delete(*children)
+    application.output_preview.configure(columns=())
+    application.export_button.configure(state="disabled")
+
+
+def profile_selection_action(application: ApplicationWindow) -> None:
+    from .gui_controller import manual_profile_columns
+
+    invalidate_export_preview(application)
+    profile = next((item for item in application.export_state.get("profiles", ())
+                    if item.profile_id == application.profile.get()), None)
+    application.profile_notes.set(profile.notes if profile else "")
+    application.manual_fields.set("Manual fields: " + (
+        ", ".join(column.name for column in manual_profile_columns(profile)) or "none"
+    ) if profile else "")
+
+
+def path_mode_action(application: ApplicationWindow) -> None:
+    invalidate_export_preview(application)
+    session = application.session_state.get("session")
+    rebased = (session is not None and session.snapshot.ready_for_export
+               and application.path_mode.get() == "Rebased root")
+    application.target_root_entry.configure(state="normal" if rebased else "disabled")
+    application.target_style_box.configure(state="readonly" if rebased else "disabled")
+    if not rebased:
+        application.target_root.set("")
+        application.target_style.set("")
+
+
+def refresh_export_controls(application: ApplicationWindow) -> None:
+    from .gui_controller import export_profile_views, PATH_MODE_CHOICES, TARGET_STYLE_CHOICES
+
+    invalidate_export_preview(application)
+    profiles = export_profile_views()
+    application.export_state["profiles"] = profiles
+    session = application.session_state["session"]
+    ready = session.snapshot.ready_for_export
+    application.profile.set("")
+    application.profile_box.configure(values=tuple(item.profile_id for item in profiles),
+                                      state="readonly" if ready else "disabled")
+    application.path_mode.set("Relative to FASTQ root")
+    application.path_mode_box.configure(values=tuple(label for label, _ in PATH_MODE_CHOICES),
+                                        state="readonly" if ready else "disabled")
+    application.target_style_box.configure(values=tuple(label for label, _ in TARGET_STYLE_CHOICES))
+    application.preview_button.configure(state="normal" if ready else "disabled")
+    profile_selection_action(application)
+    path_mode_action(application)
+
+
+def preview_export_action(application: ApplicationWindow) -> None:
+    from .gui_controller import plan_session_export
+
+    invalidate_export_preview(application)
+    try:
+        session = application.session_state.get("session")
+        if session is None:
+            raise ValueError("Run Audit before planning export.")
+        if audit_input_signature(application) != application.session_state.get("signature"):
+            raise ValueError("Inputs changed. Run Audit again before planning export.")
+        if not session.snapshot.ready_for_export:
+            raise ValueError("workflow is not ready for export")
+        profile_id = application.profile.get()
+        if not profile_id:
+            raise ValueError("Choose an export profile.")
+        options = (application.path_mode.get(), application.target_root.get(), application.target_style.get())
+        plan = plan_session_export(session, profile_id, options[0], target_root=options[1],
+                                   target_style_label=options[2], explicit_values=None)
+    except (OSError, ValueError) as error:
+        application.status.set(f"Export preview failed: {error}")
+        return
+    application.export_state.update(plan=plan, signature=(session, profile_id, *options))
+    sheet = plan.plan.result.sheet
+    application.output_preview.configure(columns=sheet.headers)
+    for header in sheet.headers:
+        application.output_preview.heading(header, text=header)
+        application.output_preview.column(header, width=160, minwidth=50)
+    for row in sheet.rows:
+        application.output_preview.insert("", "end", values=row.cells)
+    validation = plan.plan.result.validation
+    for finding in validation.findings:
+        application.validation_preview.insert("", "end", values=tuple(
+            "" if value is None else value for value in
+            (finding.code, finding.row_number, finding.column, finding.value, finding.message)))
+    application.status.set("Export preview valid. File writing is not enabled yet." if validation.ok else
+                           f"Export preview has {len(validation.findings)} profile validation finding(s).")
 
 
 def browse_fastq_directory(variable: Any, *, parent: Any = None, on_selected: Any = None) -> None:
@@ -139,6 +246,14 @@ def invalidate_audit_session(application: ApplicationWindow) -> None:
     application.session_state.clear()
     disable_pair_editor(application)
     application.export_button.configure(state="disabled")
+    invalidate_export_preview(application)
+    application.export_state.clear()
+    for variable in (application.profile, application.path_mode, application.target_root,
+                     application.target_style, application.profile_notes, application.manual_fields):
+        variable.set("")
+    for control in (application.profile_box, application.path_mode_box, application.target_root_entry,
+                    application.target_style_box, application.preview_button):
+        control.configure(state="disabled")
 
 
 def load_pair_editor(application: ApplicationWindow, pair_index: int) -> None:
@@ -185,6 +300,7 @@ def pair_selection_action(application: ApplicationWindow) -> None:
 def _apply_pair_action(application: ApplicationWindow, *, reset: bool) -> None:
     from .gui_controller import apply_pair_adjudication, pair_adjudication_views
 
+    invalidate_export_preview(application)
     try:
         session = application.session_state.get("session")
         if session is None:
@@ -205,6 +321,7 @@ def _apply_pair_action(application: ApplicationWindow, *, reset: bool) -> None:
         return
     application.session_state["session"] = new_session
     render_workflow(application, new_session.view)
+    refresh_export_controls(application)
     application.pairing_table.selection_set(f"pair:{index}")
     application.pairing_table.see(f"pair:{index}")
     load_pair_editor(application, index)
@@ -300,6 +417,7 @@ def audit_action(application: ApplicationWindow) -> None:
     application.session_state.update(session=session, signature=audit_input_signature(application))
     view = session.view
     render_workflow(application, view)
+    refresh_export_controls(application)
     application.status.set(
         f"Audit complete: {view.summary.inventory_count} FASTQs, "
         f"{view.summary.error_count} errors, {view.summary.warning_count} warnings."
@@ -415,11 +533,32 @@ def build_application(root: Any) -> ApplicationWindow:
 
     export_tab = tabs[4]
     export_tab.columnconfigure(1, weight=1)
-    for row, label in enumerate(("Profile", "Path mode", "Target style", "Target root", "Output file")):
+    export_variables = [tk.StringVar(root, value="") for _ in range(5)]
+    export_widgets = []
+    for row, (label, variable) in enumerate(zip(
+            ("Profile", "Path mode", "Target style", "Target root", "Output file"), export_variables)):
         ttk.Label(export_tab, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=8)
-        widget = (ttk.Combobox(export_tab, state="disabled") if row < 3
-                  else ttk.Entry(export_tab, state="disabled"))
+        widget = (ttk.Combobox(export_tab, textvariable=variable, state="disabled") if row < 3
+                  else ttk.Entry(export_tab, textvariable=variable, state="disabled"))
         widget.grid(row=row, column=1, sticky="ew", pady=8)
+        export_widgets.append(widget)
+    profile_notes = tk.StringVar(root, value="")
+    manual_fields = tk.StringVar(root, value="")
+    ttk.Label(export_tab, textvariable=profile_notes, wraplength=800).grid(row=6, column=0, columnspan=2, sticky="ew")
+    ttk.Label(export_tab, textvariable=manual_fields).grid(row=7, column=0, columnspan=2, sticky="w")
+    preview_button = ttk.Button(export_tab, text="Preview export", state="disabled")
+    preview_button.grid(row=5, column=0, sticky="w")
+    preview_tables = []
+    for row, label, columns in (
+        (8, "Candidate output", ()),
+        (9, "Profile validation", tuple(TableColumn(key, key.title()) for key in
+                                        ("code", "row", "column", "value", "message"))),
+    ):
+        container = ttk.LabelFrame(export_tab, text=label, padding=4)
+        container.grid(row=row, column=0, columnspan=2, sticky="nsew", pady=4)
+        container.columnconfigure(0, weight=1)
+        export_tab.rowconfigure(row, weight=1)
+        preview_tables.append(table(container, columns))
     export_button = ttk.Button(export_tab, text="Export", state="disabled")
     export_button.grid(row=5, column=1, sticky="e", pady=8)
     ttk.Label(frame, textvariable=status, wraplength=850).grid(row=2, column=0, sticky="ew", pady=(10, 0))
@@ -428,12 +567,23 @@ def build_application(root: Any) -> ApplicationWindow:
                              audit_button, export_button, tuple(mapping_variables), tuple(mapping_boxes),
                              load_columns_button, session_state={}, r1_selection=r1_selection,
                              r2_selection=r2_selection, confirmation=confirmation, r1_box=r1_box, r2_box=r2_box,
-                             confirmation_check=confirmation_check, apply_button=apply_button, reset_button=reset_button)
+                             confirmation_check=confirmation_check, apply_button=apply_button, reset_button=reset_button,
+                             profile=export_variables[0], profile_box=export_widgets[0],
+                             path_mode=export_variables[1], path_mode_box=export_widgets[1],
+                             target_style=export_variables[2], target_style_box=export_widgets[2],
+                             target_root=export_variables[3], target_root_entry=export_widgets[3],
+                             profile_notes=profile_notes, manual_fields=manual_fields, preview_button=preview_button,
+                             output_preview=preview_tables[0], validation_preview=preview_tables[1])
     audit_button.configure(command=lambda: audit_action(application))
     load_columns_button.configure(command=lambda: load_columns_action(application))
     pairing_table.bind("<<TreeviewSelect>>", lambda event: pair_selection_action(application))
     apply_button.configure(command=lambda: apply_pair_action(application))
     reset_button.configure(command=lambda: reset_pair_action(application))
+    export_widgets[0].bind("<<ComboboxSelected>>", lambda event: profile_selection_action(application))
+    export_widgets[1].bind("<<ComboboxSelected>>", lambda event: path_mode_action(application))
+    for box in mapping_boxes:
+        box.bind("<<ComboboxSelected>>", lambda event: invalidate_audit_session(application))
+    preview_button.configure(command=lambda: preview_export_action(application))
     return application
 
 
