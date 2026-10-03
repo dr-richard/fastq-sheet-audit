@@ -12,6 +12,196 @@ from fastq_sheet_audit.sheet import load_sheet
 from fastq_sheet_audit.workflow import build_workflow_snapshot
 
 
+def test_output_format_exact_choices():
+    from fastq_sheet_audit.serialization import SheetFormat
+    assert controller.OUTPUT_FORMAT_CHOICES == (("CSV", SheetFormat.CSV), ("TSV", SheetFormat.TSV))
+    for label, format in controller.OUTPUT_FORMAT_CHOICES:
+        assert controller.output_format_from_label(label) is format
+    for label in ("csv", "tsv", "Csv", "", "JSON", None):
+        with pytest.raises(ValueError):
+            controller.output_format_from_label(label)
+
+
+@pytest.mark.parametrize("destination", ["", None, 1, Path("output.csv")])
+def test_publication_destination_validation(tmp_path, monkeypatch, destination):
+    session = session_fixture(tmp_path)
+    def fail(*args, **kwargs):
+        pytest.fail("invalid inputs reached planning or writer")
+    monkeypatch.setattr(controller, "plan_session_export", fail)
+    monkeypatch.setattr(controller, "write_sheet_atomic", fail)
+    with pytest.raises(ValueError, match="destination"):
+        controller.write_session_export(session, "generic", "Local absolute", destination, "CSV")
+
+
+@pytest.mark.parametrize("overwrite", [0, 1, None, "true"])
+def test_publication_requires_boolean_overwrite(tmp_path, overwrite):
+    with pytest.raises(ValueError, match="overwrite"):
+        controller.write_session_export(session_fixture(tmp_path), "generic", "Local absolute",
+                                        str(tmp_path / "out.csv"), "CSV", overwrite=overwrite)
+
+
+def test_publication_exact_fresh_planning_and_writer_delegation(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    from fastq_sheet_audit.column_mapping import ColumnRole
+    from fastq_sheet_audit.serialization import SheetFormat
+    session = session_fixture(tmp_path)
+    extra = tmp_path / "reference-only.fastq"
+    assignments = session.snapshot.reconciliation.assignments
+    session = replace(session, snapshot=replace(session.snapshot, reconciliation=replace(
+        session.snapshot.reconciliation, assignments=assignments + (replace(assignments[0], path=extra, role=ColumnRole.R2),))))
+    fresh = controller.plan_session_export(session, "nfcore-rnaseq-3.27.0", "Relative to FASTQ root",
+                                          explicit_values={2: {"strandedness": "reverse"}})
+    calls = []
+    def plan(*args, **kwargs):
+        calls.append("plan")
+        return fresh
+    def write(*args, **kwargs):
+        assert calls == ["plan"] and fresh.plan.result.validation.ok
+        calls.append("write")
+        return tmp_path / "writer-returned.csv"
+    planner, writer = Mock(side_effect=plan), Mock(side_effect=write)
+    monkeypatch.setattr(controller, "plan_session_export", planner)
+    monkeypatch.setattr(controller, "write_sheet_atomic", writer)
+    manual = {2: {"strandedness": "reverse"}}
+    result = controller.write_session_export(session, "exact-profile", "exact-path", " output.tsv ", "CSV",
+        target_root=" exact root ", target_style_label="Windows", explicit_values=manual, overwrite=True)
+    planner.assert_called_once_with(session, "exact-profile", "exact-path", target_root=" exact root ",
+                                    target_style_label="Windows", explicit_values=manual)
+    assert planner.call_args.kwargs["explicit_values"] is manual
+    protected = (session.sample_sheet_path, *(r.path for r in session.inventory),
+                 *(a.path for a in session.snapshot.reconciliation.assignments))
+    writer.assert_called_once_with(fresh.plan.result.sheet, Path(" output.tsv "), SheetFormat.CSV,
+                                   protected_paths=protected, overwrite=True)
+    assert writer.call_args.args[0] is fresh.plan.result.sheet
+    assert result.plan is fresh and result.destination == tmp_path / "writer-returned.csv"
+    assert result.format is SheetFormat.CSV
+    with pytest.raises(FrozenInstanceError):
+        result.destination = Path("changed")
+
+
+@pytest.mark.parametrize("format,delimiter", [("CSV", ","), ("TSV", "\t")])
+def test_real_publication_exact_bytes_explicit_format_and_absolute_return(tmp_path, monkeypatch, format, delimiter):
+    session = session_fixture(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = controller.write_session_export(session, "generic", "Relative to FASTQ root", "output.tsv", format)
+    assert result.destination == tmp_path / "output.tsv"
+    assert result.destination.read_bytes() == (
+        delimiter.join(("sample", "r1", "r2")) + "\n" +
+        delimiter.join(("A", "A_R1.fastq", "A_R2.fastq")) + "\n").encode()
+
+
+@pytest.mark.parametrize("mode,options,prefix", [
+    ("Local absolute", {}, None),
+    ("Rebased root", {"target_root": "/data/项目", "target_style_label": "POSIX"}, "/data/项目/"),
+    ("Rebased root", {"target_root": "D:\\项目", "target_style_label": "Windows"}, "D:\\项目\\"),
+])
+def test_real_publication_path_modes(tmp_path, mode, options, prefix):
+    session = session_fixture(tmp_path)
+    result = controller.write_session_export(session, "generic", mode, str(tmp_path / "out.csv"), "CSV", **options)
+    expected = str(session.fastq_root / "A_R1.fastq") if prefix is None else prefix + "A_R1.fastq"
+    assert result.plan.plan.result.sheet.rows[0].cells[1] == expected
+    assert expected in result.destination.read_text()
+
+
+@pytest.mark.parametrize("value", [" α =SUM(A1) ", "001", "+7", "@value", ""])
+def test_real_publication_exact_manual_text_and_no_reload_network(tmp_path, monkeypatch, value):
+    session = session_fixture(tmp_path)
+    before = replace(session)
+    manual = {2: {"genome": value}}
+    def fail(*args, **kwargs):
+        pytest.fail("publication reloaded/scanned/rebuilt or accessed network/FASTQ contents")
+    for name in ("load_sheet", "scan_fastqs", "build_workflow_snapshot"):
+        monkeypatch.setattr(controller, name, fail)
+    monkeypatch.setattr("socket.socket", fail)
+    original_open = Path.open
+    def guarded_open(path, mode="r", *args, **kwargs):
+        if path in tuple(record.path for record in session.inventory):
+            fail()
+        return original_open(path, mode, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", guarded_open)
+    result = controller.write_session_export(session, "nfcore-methylseq-4.2.0", "Relative to FASTQ root",
+                                             str(tmp_path / "out.csv"), "CSV", explicit_values=manual)
+    import csv
+    assert list(csv.reader(result.destination.read_text().splitlines()))[1][-1] == value
+    assert manual == {2: {"genome": value}} and session == before
+
+
+@pytest.mark.parametrize("manual", [None, {2: {"strandedness": "Reverse"}}, {2: {"strandedness": ""}}])
+def test_invalid_profile_plan_never_reaches_writer(tmp_path, monkeypatch, manual):
+    session = session_fixture(tmp_path)
+    destination = tmp_path / "out.csv"
+    destination.write_bytes(b"original")
+    def fail(*args, **kwargs):
+        pytest.fail("invalid plan reached writer")
+    monkeypatch.setattr(controller, "write_sheet_atomic", fail)
+    with pytest.raises(ValueError, match="export plan has profile validation findings"):
+        controller.write_session_export(session, "nfcore-rnaseq-3.27.0", "Relative to FASTQ root",
+            str(destination), "CSV", explicit_values=manual, overwrite=True)
+    assert destination.read_bytes() == b"original"
+
+
+def test_valid_rnaseq_publication_and_planner_safety_gates(tmp_path, monkeypatch):
+    session = session_fixture(tmp_path)
+    result = controller.write_session_export(session, "nfcore-rnaseq-3.27.0", "Relative to FASTQ root",
+        str(tmp_path / "rnaseq.csv"), "CSV", explicit_values={2: {"strandedness": "reverse"}})
+    assert result.destination.read_text().endswith(",reverse\n")
+    def fail(*args, **kwargs):
+        pytest.fail("rejected workflow/profile reached writer")
+    monkeypatch.setattr(controller, "write_sheet_atomic", fail)
+    with pytest.raises(ValueError, match="barcode_mapping"):
+        controller.write_session_export(session, "nfcore-viralrecon-3.0.0-nanopore", "Local absolute",
+                                         str(tmp_path / "barcode.csv"), "CSV")
+    unready = controller.apply_pair_adjudication(session, 0, "Unassigned", "Automatic", False)
+    with pytest.raises(ValueError, match="not ready"):
+        controller.write_session_export(unready, "generic", "Local absolute", str(tmp_path / "bad.csv"), "CSV")
+
+
+def test_publication_effective_adjudicated_read_and_all_raw_paths_protected(tmp_path):
+    session = session_fixture(tmp_path, ambiguous=True)
+    original = session.fastq_root / session.sheet.rows[0].cells[1]
+    resolution = session.snapshot.pair_resolutions[0]
+    index = next(i for i, record in enumerate(resolution.group.r1) if record.path != original)
+    choice = controller.pair_adjudication_views(session)[0].r1_choices[index].display
+    session = controller.apply_pair_adjudication(session, 0, choice, "Automatic", False)
+    result = controller.write_session_export(session, "generic", "Local absolute", str(tmp_path / "out.csv"), "CSV")
+    assert str(session.snapshot.pair_resolutions[0].effective_r1.path) in result.destination.read_text()
+    for protected in (session.sample_sheet_path, *(record.path for record in session.inventory)):
+        before = protected.read_bytes()
+        with pytest.raises(ValueError, match="protected"):
+            controller.write_session_export(session, "generic", "Local absolute", str(protected), "CSV", overwrite=True)
+        assert protected.read_bytes() == before
+
+
+def test_assignment_only_path_is_protected(tmp_path):
+    from fastq_sheet_audit.column_mapping import ColumnRole
+    session = session_fixture(tmp_path)
+    extra = tmp_path / "referenced.fastq"
+    extra.write_bytes(b"protected")
+    reconciliation = session.snapshot.reconciliation
+    assignment = replace(reconciliation.assignments[0], path=extra, role=ColumnRole.R2)
+    session = replace(session, snapshot=replace(session.snapshot, reconciliation=replace(
+        reconciliation, assignments=reconciliation.assignments + (replace(assignment, row_number=999),))))
+    with pytest.raises(ValueError, match="protected"):
+        controller.write_session_export(session, "generic", "Relative to FASTQ root", str(extra), "CSV", overwrite=True)
+    assert extra.read_bytes() == b"protected"
+
+
+def test_publication_overwrite_and_unexpected_writer_error(tmp_path, monkeypatch):
+    session = session_fixture(tmp_path)
+    destination = tmp_path / "out.csv"
+    destination.write_bytes(b"previous")
+    with pytest.raises(FileExistsError):
+        controller.write_session_export(session, "generic", "Relative to FASTQ root", str(destination), "CSV")
+    assert destination.read_bytes() == b"previous"
+    controller.write_session_export(session, "generic", "Relative to FASTQ root", str(destination), "CSV", overwrite=True)
+    assert destination.read_text().startswith("sample,r1,r2\n")
+    def fail(*args, **kwargs):
+        raise RuntimeError("writer bug")
+    monkeypatch.setattr(controller, "write_sheet_atomic", fail)
+    with pytest.raises(RuntimeError, match="writer bug"):
+        controller.write_session_export(session, "generic", "Relative to FASTQ root", str(destination), "CSV")
+
+
 @pytest.mark.parametrize("profile_id, names", [
     ("generic", ()), ("nfcore-rnaseq-3.27.0", ("strandedness",)),
     ("nfcore-methylseq-4.2.0", ("genome",)), ("nfcore-smrnaseq-2.4.1", ()),

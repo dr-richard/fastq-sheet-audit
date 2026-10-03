@@ -8,12 +8,14 @@ from .adjudication import PairDecision, RoleDecision, RoleDecisionKind
 from .column_mapping import ColumnMappingResult, ColumnRole, map_columns
 from .inventory import InventoryRecord, scan_fastqs
 from .export_plan import ExportPlan, build_export_plan
+from .export_io import write_sheet_atomic
 from .pairing import PairKey
 from .pathmap import ExportMode, TargetStyle
 from .presentation import WorkflowView, present_workflow
 from .profiles import Profile, list_profile_ids, load_profile
 from .read_mode import ReadMode
 from .sheet import SampleSheet, load_sheet
+from .serialization import SheetFormat
 from .workflow import WorkflowSnapshot, build_workflow_snapshot
 
 
@@ -346,3 +348,52 @@ def plan_session_export(
     plan = build_export_plan(session.sheet, session.mapping, session.snapshot, profile, mode,
                              target_root=root, target_style=style, explicit_values=explicit_values)
     return SessionExportPlan(_export_profile_view(profile), plan)
+
+
+OUTPUT_FORMAT_CHOICES = (("CSV", SheetFormat.CSV), ("TSV", SheetFormat.TSV))
+
+
+def output_format_from_label(label: str) -> SheetFormat:
+    for display, format in OUTPUT_FORMAT_CHOICES:
+        if label == display:
+            return format
+    raise ValueError(f"unknown output format: {label!r}")
+
+
+@dataclass(frozen=True)
+class SessionExportWriteResult:
+    plan: SessionExportPlan
+    destination: Path
+    format: SheetFormat
+
+
+def write_session_export(
+    session: AuditSession,
+    profile_id: str,
+    path_mode_label: str,
+    destination: str,
+    format_label: str,
+    *,
+    target_root: str = "",
+    target_style_label: str = "",
+    explicit_values: Mapping[int, Mapping[str, str]] | None = None,
+    overwrite: bool = False,
+) -> SessionExportWriteResult:
+    """Freshly plan and validate, then delegate publication with all inputs protected."""
+    if not isinstance(destination, str) or not destination:
+        raise ValueError("destination must be a non-empty string")
+    if type(overwrite) is not bool:
+        raise ValueError("overwrite must be a boolean")
+    format = output_format_from_label(format_label)
+    plan = plan_session_export(session, profile_id, path_mode_label, target_root=target_root,
+                               target_style_label=target_style_label, explicit_values=explicit_values)
+    if not plan.plan.result.validation.ok:
+        raise ValueError("export plan has profile validation findings")
+    protected_paths = (
+        session.sample_sheet_path,
+        *(record.path for record in session.inventory),
+        *(assignment.path for assignment in session.snapshot.reconciliation.assignments),
+    )
+    written = write_sheet_atomic(plan.plan.result.sheet, Path(destination), format,
+                                 protected_paths=protected_paths, overwrite=overwrite)
+    return SessionExportWriteResult(plan, written, format)
