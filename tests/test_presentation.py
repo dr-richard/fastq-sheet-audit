@@ -58,7 +58,7 @@ def test_reconciliation_findings_preserve_values_and_order():
     assert [row.severity for row in view.findings] == ["error", "warning"]
     assert view.findings[0].row_number == 8
     assert view.findings[0].sample == " α-A "
-    assert view.findings[0].path == "relative/A.fastq"
+    assert view.findings[0].path == str(Path("relative/A.fastq"))
     assert view.findings[1].path is None
     assert view.summary.error_count == view.summary.warning_count == 1
 
@@ -85,7 +85,7 @@ def test_collision_warning_contains_every_path():
     row, = view.findings
     assert (row.source, row.code, row.severity) == ("portability", "PATH_CASE_COLLISION", "warning")
     assert collision.normalized_key in row.message
-    assert all(str(record.path) in row.message for record in collision.records)
+    assert all(repr(str(record.path)) in row.message for record in collision.records)
     assert view.summary.warning_count == 1
     assert not view.summary.ready_for_export
 

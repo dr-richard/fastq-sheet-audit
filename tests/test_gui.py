@@ -307,7 +307,7 @@ def test_export_exact_delegation_copy_fresh_plan_and_render(monkeypatch):
     assert application.export_state["signature"] == gui.preview_signature(application)
     assert application.output_preview.options["columns"] == ("fresh", "columns")
     assert application.output_preview.rows == [(" α =value ", "01"), ("+2", "@path")]
-    assert application.status.get() == "Export written: /absolute/written.tsv"
+    assert application.status.get() == f"Export written: {Path('/absolute/written.tsv')}"
     assert application.output_file.get() == " exact output.tsv "
     application.export_button.configure.assert_called_with(state="normal")
     writer.side_effect = FileExistsError("already exists")
