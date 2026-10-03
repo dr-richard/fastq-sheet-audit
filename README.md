@@ -1,5 +1,11 @@
 # fastq-sheet-audit
 
+<p align="center">
+  <img src="src/fastq_sheet_audit/assets/app_icon.png"
+       alt="fastq-sheet-audit icon"
+       width="128">
+</p>
+
 A local, offline FASTQ ↔ sample-sheet preflight tool with a command-line audit,
 a native desktop GUI, and explicit, validated sample-sheet export.
 
