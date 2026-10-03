@@ -88,3 +88,84 @@ def test_unexpected_controller_errors_are_not_swallowed(tmp_path, monkeypatch):
     monkeypatch.setattr(controller, "load_sheet", fail)
     with pytest.raises(RuntimeError, match="programmer error"):
         controller.audit_inputs(str(root), str(path), "Auto")
+
+
+def test_inspection_preserves_indexes_headers_and_ambiguity(tmp_path):
+    from fastq_sheet_audit.column_mapping import ColumnRole
+    path = tmp_path / "sheet.csv"
+    path.write_text("sample,Sample,sample_id,fastq_1,metadata\n")
+    view = controller.inspect_sheet_mapping(str(path))
+    assert [(choice.index, choice.header, choice.display) for choice in view.choices] == [
+        (0, "sample", "[0] sample"), (1, "Sample", "[1] Sample"),
+        (2, "sample_id", "[2] sample_id"), (3, "fastq_1", "[3] fastq_1"), (4, "metadata", "[4] metadata"),
+    ]
+    roles = {item.role: item for item in view.roles}
+    assert roles[ColumnRole.SAMPLE].candidates == (0, 1, 2)
+    assert roles[ColumnRole.SAMPLE].ambiguous
+    assert roles[ColumnRole.SAMPLE].selected is None
+    assert roles[ColumnRole.R1].automatic == roles[ColumnRole.R1].selected == 3
+    assert roles[ColumnRole.R2].selected is None
+    from dataclasses import FrozenInstanceError
+    with pytest.raises(FrozenInstanceError):
+        view.choices[0].index = 9
+
+
+def test_inspection_never_scans_reconciles_writes_or_networks(tmp_path, monkeypatch):
+    path = tmp_path / "sheet.csv"
+    path.write_text("sample,r1\n")
+    def fail(*args, **kwargs):
+        pytest.fail("mapping inspection accessed forbidden operation")
+    monkeypatch.setattr(controller, "scan_fastqs", fail)
+    monkeypatch.setattr(controller, "build_workflow_snapshot", fail)
+    monkeypatch.setattr("socket.socket", fail)
+    monkeypatch.setattr(Path, "write_text", fail)
+    monkeypatch.setattr(Path, "write_bytes", fail)
+    assert controller.inspect_sheet_mapping(str(path)).roles[0].automatic == 0
+
+
+@pytest.mark.parametrize("source", ["", "missing.csv", "."])
+def test_inspection_invalid_paths(tmp_path, monkeypatch, source):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError):
+        controller.inspect_sheet_mapping(source)
+
+
+def test_selection_conversion_and_explicit_audit(tmp_path):
+    from fastq_sheet_audit.column_mapping import ColumnRole
+    root, path = inputs(tmp_path)
+    path.write_text("sample,sampleid,r1,r2\nA,A,A_R1.fastq,A_R2.fastq\n")
+    view = controller.inspect_sheet_mapping(str(path))
+    overrides = controller.mapping_overrides(view, {
+        ColumnRole.SAMPLE: "[1] sampleid", ColumnRole.R1: "Automatic", ColumnRole.R2: "Unassigned",
+    })
+    assert overrides == {ColumnRole.SAMPLE: 1, ColumnRole.R2: None}
+    # Explicit unassigned R2 is valid mapping, though the unlisted discovered mate remains visible.
+    result = controller.audit_inputs(str(root), str(path), "Auto", overrides)
+    assert any(row.code == "UNLISTED_FASTQ" for row in result.findings)
+    assert controller.audit_inputs(str(root), str(path), "Auto", {ColumnRole.SAMPLE: 1}).summary.ready_for_export
+    with pytest.raises(ValueError, match="Ambiguous"):
+        controller.audit_inputs(str(root), str(path), "Auto",
+                                controller.mapping_overrides(view, {ColumnRole.SAMPLE: "Automatic"}))
+
+
+@pytest.mark.parametrize("role", ["SAMPLE", "R1"])
+def test_required_role_explicit_unassigned_refused(tmp_path, role):
+    from fastq_sheet_audit.column_mapping import ColumnRole
+    root, path = inputs(tmp_path)
+    with pytest.raises(ValueError, match="requires SAMPLE and R1"):
+        controller.audit_inputs(str(root), str(path), "Auto", {ColumnRole[role]: None})
+
+
+def test_same_column_reuse_rejected_by_existing_mapper(tmp_path):
+    from fastq_sheet_audit.column_mapping import ColumnRole
+    root, path = inputs(tmp_path)
+    with pytest.raises(ValueError, match="multiple roles"):
+        controller.audit_inputs(str(root), str(path), "Auto", {ColumnRole.SAMPLE: 0, ColumnRole.R1: 0})
+
+
+def test_unknown_display_choice_rejected(tmp_path):
+    from fastq_sheet_audit.column_mapping import ColumnRole
+    _, path = inputs(tmp_path)
+    view = controller.inspect_sheet_mapping(str(path))
+    with pytest.raises(ValueError, match="unknown column choice"):
+        controller.mapping_overrides(view, {ColumnRole.SAMPLE: "sample"})

@@ -5,7 +5,7 @@ Manual smoke command: python -m fastq_sheet_audit.gui
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -68,6 +68,10 @@ class ApplicationWindow:
     summary_values: tuple[tuple[str, Any], ...]
     audit_button: Any
     export_button: Any
+    mapping_variables: tuple[tuple[Any, Any], ...] = ()
+    mapping_boxes: tuple[Any, ...] = ()
+    load_columns_button: Any = None
+    mapping_state: dict = field(default_factory=dict)
 
 
 def browse_fastq_directory(variable: Any, *, parent: Any = None) -> None:
@@ -78,7 +82,7 @@ def browse_fastq_directory(variable: Any, *, parent: Any = None) -> None:
         variable.set(selected)
 
 
-def browse_sample_sheet(variable: Any, *, parent: Any = None) -> None:
+def browse_sample_sheet(variable: Any, *, parent: Any = None, on_selected: Any = None) -> None:
     from tkinter import filedialog
 
     selected = filedialog.askopenfilename(
@@ -87,6 +91,37 @@ def browse_sample_sheet(variable: Any, *, parent: Any = None) -> None:
     )
     if selected:
         variable.set(selected)
+        if on_selected is not None:
+            on_selected()
+
+
+def clear_column_mapping(application: ApplicationWindow) -> None:
+    application.mapping_state.clear()
+    for _, variable in application.mapping_variables:
+        variable.set("Automatic")
+    for box in application.mapping_boxes:
+        box.configure(state="disabled", values=())
+
+
+def load_columns_action(application: ApplicationWindow) -> None:
+    from .gui_controller import inspect_sheet_mapping
+
+    clear_column_mapping(application)
+    path = application.sample_sheet.get()
+    try:
+        view = inspect_sheet_mapping(path)
+    except (OSError, ValueError) as error:
+        application.status.set(f"Load columns failed: {error}")
+        return
+    application.mapping_state.update(path=path, view=view)
+    choices = ("Automatic", "Unassigned") + tuple(choice.display for choice in view.choices)
+    roles = {item.role: item for item in view.roles}
+    for (role, variable), box in zip(application.mapping_variables, application.mapping_boxes):
+        box.configure(state="readonly", values=choices)
+        selected = roles[role].selected
+        variable.set(view.choices[selected].display if selected is not None else "Automatic")
+    unresolved = ", ".join(item.role.name for item in view.roles if item.selected is None)
+    application.status.set(f"Columns loaded. Unresolved roles: {unresolved}." if unresolved else "Columns loaded.")
 
 
 def clear_audit_view(application: ApplicationWindow) -> None:
@@ -123,13 +158,24 @@ def render_workflow(application: ApplicationWindow, view: Any) -> None:
 
 
 def audit_action(application: ApplicationWindow) -> None:
-    from .gui_controller import audit_inputs
+    from .gui_controller import audit_inputs, inspect_sheet_mapping, mapping_overrides
 
     clear_audit_view(application)
     application.status.set("Auditing…")
     try:
+        overrides = None
+        if application.mapping_state:
+            path = application.sample_sheet.get()
+            if path != application.mapping_state["path"]:
+                clear_column_mapping(application)
+                raise ValueError("Sample-sheet path changed. Load columns again.")
+            view = application.mapping_state["view"]
+            if inspect_sheet_mapping(path) != view:
+                clear_column_mapping(application)
+                raise ValueError("Sample-sheet columns changed. Load columns again.")
+            overrides = mapping_overrides(view, {role: variable.get() for role, variable in application.mapping_variables})
         view = audit_inputs(application.fastq_directory.get(), application.sample_sheet.get(),
-                            application.read_mode.get())
+                            application.read_mode.get(), overrides=overrides)
     except (OSError, ValueError) as error:
         application.status.set(f"Audit failed: {error}")
         return
@@ -144,6 +190,7 @@ def build_application(root: Any) -> ApplicationWindow:
     """Construct widgets on an existing root without scanning or loading data."""
     import tkinter as tk
     from tkinter import ttk
+    from .gui_controller import ColumnRole
 
     root.title(APPLICATION_TITLE)
     root.minsize(*MINIMUM_SIZE)
@@ -165,14 +212,32 @@ def build_application(root: Any) -> ApplicationWindow:
     )):
         ttk.Label(inputs, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(inputs, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=4)
-        browse = browse_fastq_directory if row == 0 else browse_sample_sheet
-        ttk.Button(inputs, text="Browse", command=lambda action=browse, value=variable:
-                   action(value, parent=root)).grid(row=row, column=2, padx=(8, 0), pady=4)
+        if row == 0:
+            command = lambda: browse_fastq_directory(fastq_directory, parent=root)
+        else:
+            command = lambda: browse_sample_sheet(sample_sheet, parent=root,
+                                                  on_selected=lambda: clear_column_mapping(application))
+        ttk.Button(inputs, text="Browse", command=command).grid(row=row, column=2, padx=(8, 0), pady=4)
     ttk.Label(inputs, text="Read mode").grid(row=2, column=0, sticky="w", pady=4)
     ttk.Combobox(inputs, textvariable=read_mode, state="readonly",
                  values=tuple(label for label, _ in READ_MODE_CHOICES)).grid(row=2, column=1, sticky="w")
     audit_button = ttk.Button(inputs, text="Audit")
     audit_button.grid(row=2, column=2, padx=(8, 0))
+    mapping_frame = ttk.LabelFrame(inputs, text="Column mapping", padding=8)
+    mapping_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+    mapping_variables, mapping_boxes = [], []
+    for column, (role, label) in enumerate((
+        (ColumnRole.SAMPLE, "Sample column"), (ColumnRole.R1, "R1 column"), (ColumnRole.R2, "R2 column"),
+    )):
+        mapping_frame.columnconfigure(column, weight=1)
+        ttk.Label(mapping_frame, text=label).grid(row=0, column=column, sticky="w")
+        variable = tk.StringVar(root, value="Automatic")
+        box = ttk.Combobox(mapping_frame, textvariable=variable, state="disabled")
+        box.grid(row=1, column=column, sticky="ew", padx=(0, 8))
+        mapping_variables.append((role, variable))
+        mapping_boxes.append(box)
+    load_columns_button = ttk.Button(mapping_frame, text="Load columns")
+    load_columns_button.grid(row=1, column=3)
 
     notebook = ttk.Notebook(frame)
     notebook.grid(row=1, column=0, sticky="nsew")
@@ -223,8 +288,10 @@ def build_application(root: Any) -> ApplicationWindow:
     ttk.Label(frame, textvariable=status, wraplength=850).grid(row=2, column=0, sticky="ew", pady=(10, 0))
     application = ApplicationWindow(root, fastq_directory, sample_sheet, read_mode, status, notebook,
                              findings_table, inventory_table, pairing_table, tuple(summary_values),
-                             audit_button, export_button)
+                             audit_button, export_button, tuple(mapping_variables), tuple(mapping_boxes),
+                             load_columns_button)
     audit_button.configure(command=lambda: audit_action(application))
+    load_columns_button.configure(command=lambda: load_columns_action(application))
     return application
 
 

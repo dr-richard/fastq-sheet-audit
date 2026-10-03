@@ -131,12 +131,15 @@ class FakeTable:
 
 
 def fake_application():
+    from fastq_sheet_audit.column_mapping import ColumnRole
     events = []
     return SimpleNamespace(
         findings_table=FakeTable(events), inventory_table=FakeTable(events), pairing_table=FakeTable(events),
         summary_values=tuple((key, FakeVariable()) for key, _ in gui.SUMMARY_FIELDS),
         export_button=Mock(), status=FakeVariable(), fastq_directory=FakeVariable("root"),
         sample_sheet=FakeVariable("sheet.csv"), read_mode=FakeVariable("Auto"), events=events,
+        mapping_state={}, mapping_variables=tuple((role, FakeVariable("Automatic")) for role in ColumnRole),
+        mapping_boxes=tuple(Mock() for _ in ColumnRole),
     )
 
 
@@ -185,7 +188,7 @@ def test_browse_cancellation_and_selection_without_tk(monkeypatch, browse, dialo
 def test_audit_callback_localizes_expected_errors_and_clears_old_data(monkeypatch):
     from fastq_sheet_audit import gui_controller
     application = fake_application()
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise ValueError("Ambiguous mapping")
     monkeypatch.setattr(gui_controller, "audit_inputs", fail)
     gui.audit_action(application)
@@ -204,8 +207,83 @@ def test_audit_callback_success_and_unexpected_error_boundary(monkeypatch):
     gui.audit_action(application)
     assert application.status.get() == "Audit complete: 2 FASTQs, 0 errors, 0 warnings."
     assert dict(application.summary_values)["ready_for_export"].get() == "Ready"
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise RuntimeError("unexpected")
     monkeypatch.setattr(gui_controller, "audit_inputs", fail)
     with pytest.raises(RuntimeError, match="unexpected"):
         gui.audit_action(application)
+
+
+def test_load_columns_populates_index_choices_without_tk(tmp_path):
+    from fastq_sheet_audit.column_mapping import ColumnRole
+    path = tmp_path / "sheet.csv"
+    path.write_text("sample,sample_id,read1\n")
+    application = fake_application()
+    application.sample_sheet.set(str(path))
+    gui.load_columns_action(application)
+    variables = dict(application.mapping_variables)
+    assert variables[ColumnRole.SAMPLE].get() == "Automatic"
+    assert variables[ColumnRole.R1].get() == "[2] read1"
+    assert "SAMPLE" in application.status.get()
+    assert application.mapping_state["path"] == str(path)
+    for box in application.mapping_boxes:
+        assert box.configure.call_args.kwargs == {
+            "state": "readonly", "values": ("Automatic", "Unassigned", "[0] sample", "[1] sample_id", "[2] read1"),
+        }
+
+
+def test_stale_path_or_changed_columns_refuses_audit(tmp_path, monkeypatch):
+    from fastq_sheet_audit import gui_controller
+    path = tmp_path / "sheet.csv"
+    path.write_text("sample,r1\n")
+    application = fake_application()
+    application.sample_sheet.set(str(path))
+    gui.load_columns_action(application)
+    audit = Mock()
+    monkeypatch.setattr(gui_controller, "audit_inputs", audit)
+    application.sample_sheet.set(str(tmp_path / "other.csv"))
+    gui.audit_action(application)
+    audit.assert_not_called()
+    assert "Load columns again" in application.status.get()
+    assert application.mapping_state == {}
+    assert all(variable.get() == "Automatic" for _, variable in application.mapping_variables)
+    application.sample_sheet.set(str(path))
+    gui.load_columns_action(application)
+    path.write_text("r1,sample\n")
+    gui.audit_action(application)
+    audit.assert_not_called()
+    assert "columns changed" in application.status.get()
+
+
+def test_browse_cancel_preserves_mapping_and_new_selection_clears_it(monkeypatch):
+    application = fake_application()
+    application.mapping_state.update(path="sheet.csv", view="loaded")
+    chooser = Mock(return_value="")
+    monkeypatch.setitem(sys.modules, "tkinter", SimpleNamespace(filedialog=SimpleNamespace(askopenfilename=chooser)))
+    callback = lambda: gui.clear_column_mapping(application)
+    gui.browse_sample_sheet(application.sample_sheet, on_selected=callback)
+    assert application.mapping_state == {"path": "sheet.csv", "view": "loaded"}
+    assert application.sample_sheet.get() == "sheet.csv"
+    chooser.return_value = "new.csv"
+    gui.browse_sample_sheet(application.sample_sheet, on_selected=callback)
+    assert application.sample_sheet.get() == "new.csv"
+    assert application.mapping_state == {}
+
+
+def test_audit_passes_exact_mapping_overrides(tmp_path, monkeypatch):
+    from fastq_sheet_audit import gui_controller
+    from fastq_sheet_audit.column_mapping import ColumnRole
+    from fastq_sheet_audit.presentation import SummaryView, WorkflowView
+    path = tmp_path / "sheet.csv"
+    path.write_text("sample,sampleid,r1,r2\n")
+    application = fake_application()
+    application.sample_sheet.set(str(path))
+    gui.load_columns_action(application)
+    variables = dict(application.mapping_variables)
+    variables[ColumnRole.SAMPLE].set("[1] sampleid")
+    variables[ColumnRole.R1].set("Automatic")
+    variables[ColumnRole.R2].set("Unassigned")
+    audit = Mock(return_value=WorkflowView(SummaryView(0, 0, 0, 0, True), (), (), ()))
+    monkeypatch.setattr(gui_controller, "audit_inputs", audit)
+    gui.audit_action(application)
+    assert audit.call_args.kwargs["overrides"] == {ColumnRole.SAMPLE: 1, ColumnRole.R2: None}
