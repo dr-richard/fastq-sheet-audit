@@ -169,6 +169,8 @@ def fake_application():
         manual_table=FakeTable(events), manual_column=FakeVariable(""), manual_column_box=Mock(),
         manual_value=FakeVariable(""), manual_value_entry=Mock(), manual_value_status=FakeVariable("Unset"),
         manual_set_button=Mock(), manual_clear_button=Mock(),
+        root="fake root", output_format=FakeVariable(""), output_format_box=Mock(),
+        output_file=FakeVariable(""), output_file_entry=Mock(), output_browse_button=Mock(),
     )
 
 
@@ -188,6 +190,191 @@ def manual_application(profile_id="nfcore-rnaseq-3.27.0"):
     application.profile.set(profile_id)
     gui.profile_selection_action(application)
     return application
+
+
+def publication_application():
+    application = manual_application()
+    application.export_state.update(plan=preview_plan(), signature=gui.preview_signature(application))
+    application.output_format.set("CSV")
+    application.output_file.set(" exact output.tsv ")
+    return application
+
+
+def test_publication_controls_require_current_valid_preview_and_explicit_options():
+    from fastq_sheet_audit.gui_controller import OUTPUT_FORMAT_CHOICES
+    application = export_application()
+    gui.refresh_publication_controls(application)
+    application.output_format_box.configure.assert_called_with(
+        values=tuple(label for label, _ in OUTPUT_FORMAT_CHOICES), state="disabled")
+    assert application.output_format.get() == ""
+    application.export_state.update(plan=preview_plan(), signature=gui.preview_signature(application))
+    gui.refresh_publication_controls(application)
+    application.output_format_box.configure.assert_called_with(
+        values=tuple(label for label, _ in OUTPUT_FORMAT_CHOICES), state="readonly")
+    application.output_file_entry.configure.assert_called_with(state="normal")
+    application.output_browse_button.configure.assert_called_with(state="normal")
+    application.export_button.configure.assert_called_with(state="disabled")
+    application.output_file.set(" whitespace destination ")
+    for label in ("", "csv", "JSON", "CSV", "TSV"):
+        application.output_format.set(label)
+        gui.refresh_publication_controls(application)
+        application.export_button.configure.assert_called_with(state="normal" if label in ("CSV", "TSV") else "disabled")
+        assert "plan" in application.export_state
+    application.target_root.set("changed")
+    gui.refresh_publication_controls(application)
+    application.export_button.configure.assert_called_with(state="disabled")
+    application.output_file_entry.configure.assert_called_with(state="disabled")
+
+
+@pytest.mark.parametrize("selected", ["", " Exact α output.tsv "])
+def test_output_save_dialog_preserves_text_and_explicit_format(monkeypatch, selected):
+    application = publication_application()
+    old_plan = application.export_state["plan"]
+    chooser = Mock(return_value=selected)
+    monkeypatch.setitem(sys.modules, "tkinter", SimpleNamespace(filedialog=SimpleNamespace(asksaveasfilename=chooser)))
+    gui.browse_output_file(application)
+    assert application.output_file.get() == (selected or " exact output.tsv ")
+    assert application.output_format.get() == "CSV"
+    assert application.export_state["plan"] is old_plan
+    chooser.assert_called_once_with(parent="fake root", title="Choose output file", confirmoverwrite=False)
+
+
+@pytest.mark.parametrize("problem,message", [
+    ("session", "Preview a valid export before writing."),
+    ("audit", "Inputs changed. Run Audit again before exporting."),
+    ("dirty", "Apply or clear the current manual metadata edit before export."),
+    ("missing", "Preview a valid export before writing."),
+    ("invalid", "Preview a valid export before writing."),
+    ("root", "Export options changed. Preview again before writing."),
+    ("style", "Export options changed. Preview again before writing."),
+    ("profile", "Export options changed. Preview again before writing."),
+    ("path", "Export options changed. Preview again before writing."),
+    ("manual", "Export options changed. Preview again before writing."),
+    ("format", "Choose an output format."), ("destination", "Choose an output file."),
+])
+def test_export_refusals_never_call_controller(monkeypatch, problem, message):
+    from fastq_sheet_audit import gui_controller
+    from fastq_sheet_audit.profile_validation import ProfileFinding
+    application = publication_application()
+    if problem == "session":
+        application.session_state.clear()
+    elif problem == "audit":
+        application.fastq_directory.set("changed")
+    elif problem == "dirty":
+        select_manual_cell(application)
+        application.manual_value.set("unapplied")
+    elif problem == "missing":
+        application.export_state.pop("plan")
+    elif problem == "invalid":
+        application.export_state["plan"] = preview_plan((ProfileFinding("E", "error", None, None, None),))
+    elif problem in ("root", "style", "profile", "path"):
+        getattr(application, {"root": "target_root", "style": "target_style", "profile": "profile", "path": "path_mode"}[problem]).set("changed")
+    elif problem == "manual":
+        application.export_state["manual_values"] = {9: {"strandedness": ""}}
+    elif problem == "format":
+        application.output_format.set("csv")
+    else:
+        application.output_file.set("")
+    writer = Mock()
+    monkeypatch.setattr(gui_controller, "write_session_export", writer)
+    gui.export_action(application)
+    writer.assert_not_called()
+    assert application.status.get() == f"Export failed: {message}"
+    application.export_button.configure.assert_called_with(state="disabled")
+
+
+def test_export_exact_delegation_copy_fresh_plan_and_render(monkeypatch):
+    from fastq_sheet_audit import gui_controller
+    from pathlib import Path
+    application = publication_application()
+    select_manual_cell(application)
+    gui.set_manual_value_action(application)  # explicit empty, not unset
+    application.path_mode.set("Rebased root")
+    application.target_root.set("D:\\ exact α ")
+    application.target_style.set("Windows")
+    application.export_state.update(plan=preview_plan(), signature=gui.preview_signature(application))
+    fresh = preview_plan(headers=("fresh", "columns"))
+    writer = Mock(return_value=SimpleNamespace(plan=fresh, destination=Path("/absolute/written.tsv")))
+    monkeypatch.setattr(gui_controller, "write_session_export", writer)
+    gui.export_action(application)
+    writer.assert_called_once_with(application.session_state["session"], "nfcore-rnaseq-3.27.0", "Rebased root",
+        " exact output.tsv ", "CSV", target_root="D:\\ exact α ", target_style_label="Windows",
+        explicit_values={9: {"strandedness": ""}}, overwrite=False)
+    copied = writer.call_args.kwargs["explicit_values"]
+    assert copied is not application.export_state["manual_values"]
+    assert copied[9] is not application.export_state["manual_values"][9]
+    assert application.export_state["plan"] is fresh
+    assert application.export_state["signature"] == gui.preview_signature(application)
+    assert application.output_preview.options["columns"] == ("fresh", "columns")
+    assert application.output_preview.rows == [(" α =value ", "01"), ("+2", "@path")]
+    assert application.status.get() == "Export written: /absolute/written.tsv"
+    assert application.output_file.get() == " exact output.tsv "
+    application.export_button.configure.assert_called_with(state="normal")
+    writer.side_effect = FileExistsError("already exists")
+    gui.export_action(application)
+    assert application.status.get() == "Export failed: already exists"
+    assert writer.call_args.kwargs["overwrite"] is False
+
+
+@pytest.mark.parametrize("error", [ValueError("protected input"), FileExistsError("exists"),
+                                      PermissionError("permission"), OSError("filesystem"), RuntimeError("bug")])
+def test_export_exception_boundary(monkeypatch, error):
+    from fastq_sheet_audit import gui_controller
+    application = publication_application()
+    monkeypatch.setattr(gui_controller, "write_session_export", Mock(side_effect=error))
+    if isinstance(error, RuntimeError):
+        with pytest.raises(RuntimeError):
+            gui.export_action(application)
+    else:
+        gui.export_action(application)
+        assert application.status.get() == f"Export failed: {error}"
+
+
+def test_preview_invalidation_preserves_destination_but_session_invalidation_clears_it():
+    application = publication_application()
+    gui.invalidate_export_preview(application)
+    assert application.output_format.get() == "CSV" and application.output_file.get() == " exact output.tsv "
+    application.output_browse_button.configure.assert_called_with(state="disabled")
+    gui.invalidate_audit_session(application)
+    assert application.output_format.get() == application.output_file.get() == ""
+
+
+def test_gui_real_publication_no_overwrite_and_protected_input(tmp_path, monkeypatch):
+    from fastq_sheet_audit import gui_controller
+    root = tmp_path / "reads"
+    root.mkdir()
+    fastq = root / "A_R1.fastq"
+    fastq.write_bytes(b"original FASTQ")
+    source = tmp_path / "sheet.csv"
+    source.write_text("sample,r1\nA,A_R1.fastq\n")
+    application = fake_application()
+    application.fastq_directory.set(str(root))
+    application.sample_sheet.set(str(source))
+    gui.audit_action(application)
+    application.profile.set("generic")
+    gui.profile_selection_action(application)
+    destination = tmp_path / "explicit.tsv"
+    application.output_format.set("CSV")
+    application.output_file.set(str(destination))
+    def forbidden(*args, **kwargs):
+        pytest.fail("publication rescanned/reloaded or accessed network")
+    monkeypatch.setattr(gui_controller, "load_sheet", forbidden)
+    monkeypatch.setattr(gui_controller, "scan_fastqs", forbidden)
+    monkeypatch.setattr("socket.socket", forbidden)
+    gui.preview_export_action(application)
+    assert not destination.exists()  # Preview never publishes.
+    gui.export_action(application)
+    assert destination.read_bytes() == b"sample,r1\nA,A_R1.fastq\n"
+    assert application.status.get() == f"Export written: {destination}"
+    gui.export_action(application)
+    assert application.status.get().startswith("Export failed:")
+    assert destination.read_bytes() == b"sample,r1\nA,A_R1.fastq\n"
+    for path, original in ((source, source.read_bytes()), (fastq, b"original FASTQ")):
+        application.output_file.set(str(path))
+        gui.export_action(application)
+        assert application.status.get().startswith("Export failed:")
+        assert "protected" in application.status.get()
+        assert path.read_bytes() == original
 
 
 def select_manual_cell(application, index=0, column="strandedness"):
@@ -444,7 +631,7 @@ def test_preview_exact_options_rendering_status_and_dynamic_columns(monkeypatch,
         ("EMPTY_REQUIRED_VALUE", 7, "manual", "", "exact message"), ("OTHER", "", "", "", "second")
     ] if with_findings else [])
     assert application.status.get() == ("Export preview has 2 profile validation finding(s)." if with_findings else
-                                        "Export preview valid. File writing is not enabled yet.")
+                                        "Export preview valid. Choose an output format and file to export.")
     planner.return_value = preview_plan(headers=("different", "headers"))
     gui.preview_export_action(application)
     assert application.output_preview.options["columns"] == ("different", "headers")
@@ -503,6 +690,8 @@ def test_pair_action_invalidates_preview_and_refreshes_readiness(monkeypatch, re
     gui.load_pair_editor(application, 0)
     application.export_state["plan"] = object()
     application.export_state.update(manual_values={9: {"strandedness": "reverse"}}, manual_view=object())
+    application.output_format.set("TSV")
+    application.output_file.set("previous.tsv")
     new = editor_session()
     new.snapshot.ready_for_export = ready
     monkeypatch.setattr(gui_controller, "apply_pair_adjudication", Mock(return_value=new))
@@ -510,6 +699,7 @@ def test_pair_action_invalidates_preview_and_refreshes_readiness(monkeypatch, re
     assert "plan" not in application.export_state
     assert "manual_values" not in application.export_state
     assert "manual_view" not in application.export_state
+    assert application.output_format.get() == application.output_file.get() == ""
     assert application.output_preview.rows == application.validation_preview.rows == []
     application.preview_button.configure.assert_called_with(state="normal" if ready else "disabled")
     application.export_button.configure.assert_called_with(state="disabled")
@@ -797,6 +987,8 @@ def test_browse_invalidation_only_after_selection(monkeypatch, sample):
     plan = object()
     application.export_state["plan"] = plan
     application.export_state["manual_values"] = {9: {"genome": " exact "}}
+    application.output_format.set("CSV")
+    application.output_file.set("previous.csv")
     chooser = Mock(return_value="")
     dialogs = SimpleNamespace(askdirectory=chooser, askopenfilename=chooser)
     monkeypatch.setitem(sys.modules, "tkinter", SimpleNamespace(filedialog=dialogs))
@@ -807,11 +999,13 @@ def test_browse_invalidation_only_after_selection(monkeypatch, sample):
     assert application.session_state["session"] is session
     assert application.export_state["plan"] is plan
     assert application.export_state["manual_values"] == {9: {"genome": " exact "}}
+    assert application.output_format.get() == "CSV" and application.output_file.get() == "previous.csv"
     chooser.return_value = "new path"
     browse(variable, on_selected=callback)
     assert application.session_state == {}
     assert "plan" not in application.export_state
     assert "manual_values" not in application.export_state
+    assert application.output_format.get() == application.output_file.get() == ""
     application.apply_button.configure.assert_called_with(state="disabled")
 
 
@@ -823,19 +1017,25 @@ def test_failed_audit_discards_session_and_success_starts_new_session(monkeypatc
     gui.load_pair_editor(application, 0)
     application.export_state["plan"] = object()
     application.export_state["manual_values"] = {9: {"genome": "exact"}}
+    application.output_format.set("CSV")
+    application.output_file.set("previous.csv")
     monkeypatch.setattr(gui_controller, "audit_session", Mock(side_effect=ValueError("bad input")))
     gui.audit_action(application)
     assert application.session_state == {}
     assert "plan" not in application.export_state
     assert "manual_values" not in application.export_state
+    assert application.output_format.get() == application.output_file.get() == ""
     application.apply_button.configure.assert_called_with(state="disabled")
     new = editor_session()
     monkeypatch.setattr(gui_controller, "audit_session", Mock(return_value=new))
     application.export_state["plan"] = object()
     application.export_state["manual_values"] = {9: {"genome": "exact"}}
+    application.output_format.set("CSV")
+    application.output_file.set("previous.csv")
     gui.audit_action(application)
     assert "plan" not in application.export_state
     assert "manual_values" not in application.export_state
+    assert application.output_format.get() == application.output_file.get() == ""
     assert application.session_state["session"] is new
     assert application.session_state["signature"] == gui.audit_input_signature(application)
     assert "pair_index" not in application.session_state

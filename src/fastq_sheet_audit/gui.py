@@ -1,4 +1,4 @@
-"""Native audit, adjudication, and export-preview GUI; file writing is disabled.
+"""Native audit, adjudication, preview, and explicit safe export GUI.
 
 Manual smoke command: python -m fastq_sheet_audit.gui
 """
@@ -103,6 +103,11 @@ class ApplicationWindow:
     manual_value_status: Any = None
     manual_set_button: Any = None
     manual_clear_button: Any = None
+    output_format: Any = None
+    output_format_box: Any = None
+    output_file: Any = None
+    output_file_entry: Any = None
+    output_browse_button: Any = None
 
 
 def disable_manual_editor(application: ApplicationWindow) -> None:
@@ -264,6 +269,77 @@ def invalidate_export_preview(application: ApplicationWindow) -> None:
             table.delete(*children)
     application.output_preview.configure(columns=())
     application.export_button.configure(state="disabled")
+    for control in (application.output_format_box, application.output_file_entry, application.output_browse_button):
+        control.configure(state="disabled")
+
+
+def preview_signature(application: ApplicationWindow) -> tuple:
+    return (application.session_state.get("session"), application.profile.get(), application.path_mode.get(),
+            application.target_root.get(), application.target_style.get(), manual_metadata_signature(application))
+
+
+def refresh_publication_controls(application: ApplicationWindow) -> None:
+    from .gui_controller import OUTPUT_FORMAT_CHOICES
+
+    plan = application.export_state.get("plan")
+    session = application.session_state.get("session")
+    current = (session is not None and plan is not None and plan.plan.result.validation.ok
+               and audit_input_signature(application) == application.session_state.get("signature")
+               and application.export_state.get("signature") == preview_signature(application)
+               and not manual_edit_is_dirty(application))
+    application.output_format_box.configure(values=tuple(label for label, _ in OUTPUT_FORMAT_CHOICES),
+                                            state="readonly" if current else "disabled")
+    for control in (application.output_file_entry, application.output_browse_button):
+        control.configure(state="normal" if current else "disabled")
+    enabled = (current and application.output_format.get() in tuple(label for label, _ in OUTPUT_FORMAT_CHOICES)
+               and isinstance(application.output_file.get(), str) and application.output_file.get() != "")
+    application.export_button.configure(state="normal" if enabled else "disabled")
+
+
+def browse_output_file(application: ApplicationWindow) -> None:
+    from tkinter import filedialog
+
+    selected = filedialog.asksaveasfilename(parent=application.root, title="Choose output file",
+                                           confirmoverwrite=False)
+    if selected:
+        application.output_file.set(selected)
+        refresh_publication_controls(application)
+
+
+def export_action(application: ApplicationWindow) -> None:
+    from .gui_controller import OUTPUT_FORMAT_CHOICES, write_session_export
+
+    try:
+        session = application.session_state.get("session")
+        if session is None:
+            raise ValueError("Preview a valid export before writing.")
+        if audit_input_signature(application) != application.session_state.get("signature"):
+            raise ValueError("Inputs changed. Run Audit again before exporting.")
+        if manual_edit_is_dirty(application):
+            raise ValueError("Apply or clear the current manual metadata edit before export.")
+        plan = application.export_state.get("plan")
+        if plan is None or not plan.plan.result.validation.ok:
+            raise ValueError("Preview a valid export before writing.")
+        if application.export_state.get("signature") != preview_signature(application):
+            raise ValueError("Export options changed. Preview again before writing.")
+        format_label = application.output_format.get()
+        if format_label not in tuple(label for label, _ in OUTPUT_FORMAT_CHOICES):
+            raise ValueError("Choose an output format.")
+        destination = application.output_file.get()
+        if not isinstance(destination, str) or destination == "":
+            raise ValueError("Choose an output file.")
+        result = write_session_export(
+            session, application.profile.get(), application.path_mode.get(), destination, format_label,
+            target_root=application.target_root.get(), target_style_label=application.target_style.get(),
+            explicit_values=manual_values_snapshot(application), overwrite=False)
+    except (OSError, ValueError) as error:
+        refresh_publication_controls(application)
+        application.status.set(f"Export failed: {error}")
+        return
+    application.export_state.update(plan=result.plan, signature=preview_signature(application))
+    render_export_plan(application, result.plan)
+    refresh_publication_controls(application)
+    application.status.set(f"Export written: {result.destination}")
 
 
 def profile_selection_action(application: ApplicationWindow) -> None:
@@ -305,6 +381,8 @@ def refresh_export_controls(application: ApplicationWindow) -> None:
     from .gui_controller import export_profile_views, PATH_MODE_CHOICES, TARGET_STYLE_CHOICES
 
     invalidate_export_preview(application)
+    application.output_format.set("")
+    application.output_file.set("")
     profiles = export_profile_views()
     application.export_state["profiles"] = profiles
     session = application.session_state["session"]
@@ -345,8 +423,19 @@ def preview_export_action(application: ApplicationWindow) -> None:
     except (OSError, ValueError) as error:
         application.status.set(f"Export preview failed: {error}")
         return
-    application.export_state.update(plan=plan, signature=(session, profile_id, *options,
-                                                         manual_metadata_signature(application)))
+    application.export_state.update(plan=plan, signature=preview_signature(application))
+    render_export_plan(application, plan)
+    refresh_publication_controls(application)
+    validation = plan.plan.result.validation
+    application.status.set("Export preview valid. Choose an output format and file to export." if validation.ok else
+                           f"Export preview has {len(validation.findings)} profile validation finding(s).")
+
+
+def render_export_plan(application: ApplicationWindow, plan: Any) -> None:
+    for table in (application.output_preview, application.validation_preview):
+        children = table.get_children()
+        if children:
+            table.delete(*children)
     sheet = plan.plan.result.sheet
     application.output_preview.configure(columns=sheet.headers)
     for header in sheet.headers:
@@ -359,8 +448,6 @@ def preview_export_action(application: ApplicationWindow) -> None:
         application.validation_preview.insert("", "end", values=tuple(
             "" if value is None else value for value in
             (finding.code, finding.row_number, finding.column, finding.value, finding.message)))
-    application.status.set("Export preview valid. File writing is not enabled yet." if validation.ok else
-                           f"Export preview has {len(validation.findings)} profile validation finding(s).")
 
 
 def browse_fastq_directory(variable: Any, *, parent: Any = None, on_selected: Any = None) -> None:
@@ -422,6 +509,8 @@ def invalidate_audit_session(application: ApplicationWindow) -> None:
     invalidate_export_preview(application)
     clear_manual_editor(application)
     application.export_state.clear()
+    application.output_format.set("")
+    application.output_file.set("")
     for variable in (application.profile, application.path_mode, application.target_root,
                      application.target_style, application.profile_notes, application.manual_fields):
         variable.set("")
@@ -722,6 +811,12 @@ def build_application(root: Any) -> ApplicationWindow:
     ttk.Label(export_tab, textvariable=manual_fields).grid(row=7, column=0, columnspan=2, sticky="w")
     preview_button = ttk.Button(export_tab, text="Preview export", state="disabled")
     preview_button.grid(row=5, column=0, sticky="w")
+    output_format = tk.StringVar(root, value="")
+    ttk.Label(export_tab, text="Output format").grid(row=11, column=0, sticky="w")
+    output_format_box = ttk.Combobox(export_tab, textvariable=output_format, state="disabled")
+    output_format_box.grid(row=11, column=1, sticky="ew")
+    output_browse_button = ttk.Button(export_tab, text="Browse", state="disabled")
+    output_browse_button.grid(row=4, column=2, padx=8)
     manual_frame = ttk.LabelFrame(export_tab, text="Manual metadata", padding=4)
     manual_frame.grid(row=8, column=0, columnspan=2, sticky="nsew")
     manual_frame.columnconfigure(0, weight=1)
@@ -771,7 +866,9 @@ def build_application(root: Any) -> ApplicationWindow:
                              manual_table=manual_table, manual_column=manual_column, manual_column_box=manual_column_box,
                              manual_value=manual_value, manual_value_entry=manual_value_entry,
                              manual_value_status=manual_value_status, manual_set_button=manual_set_button,
-                             manual_clear_button=manual_clear_button)
+                             manual_clear_button=manual_clear_button, output_format=output_format,
+                             output_format_box=output_format_box, output_file=export_variables[4],
+                             output_file_entry=export_widgets[4], output_browse_button=output_browse_button)
     audit_button.configure(command=lambda: audit_action(application))
     load_columns_button.configure(command=lambda: load_columns_action(application))
     pairing_table.bind("<<TreeviewSelect>>", lambda event: pair_selection_action(application))
@@ -786,6 +883,12 @@ def build_application(root: Any) -> ApplicationWindow:
     manual_column_box.bind("<<ComboboxSelected>>", lambda event: manual_column_selection_action(application))
     manual_set_button.configure(command=lambda: set_manual_value_action(application))
     manual_clear_button.configure(command=lambda: clear_manual_value_action(application))
+    output_format_box.bind("<<ComboboxSelected>>", lambda event: refresh_publication_controls(application))
+    export_variables[4].trace_add("write", lambda *args: refresh_publication_controls(application))
+    manual_value.trace_add("write", lambda *args: refresh_publication_controls(application))
+    output_browse_button.configure(command=lambda: browse_output_file(application))
+    export_button.configure(command=lambda: export_action(application))
+    refresh_publication_controls(application)
     return application
 
 
