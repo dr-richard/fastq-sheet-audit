@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fastq-sheet-audit"
 dynamic = ["version"]
-description = "Read-only preflight checks that reconcile sample sheets with FASTQ files on disk"
+description = "Local FASTQ/sample-sheet auditing with explicit, validated sample-sheet export"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
