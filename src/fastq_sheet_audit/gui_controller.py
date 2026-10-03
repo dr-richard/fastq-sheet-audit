@@ -274,6 +274,45 @@ def manual_profile_columns(profile_view: ExportProfileView) -> tuple[ExportProfi
 
 
 @dataclass(frozen=True)
+class ManualMetadataRowView:
+    row_number: int
+    sample: str
+
+
+@dataclass(frozen=True)
+class ManualMetadataView:
+    profile_view: ExportProfileView
+    columns: tuple[ExportProfileColumnView, ...]
+    rows: tuple[ManualMetadataRowView, ...]
+
+
+def manual_metadata_view(session: AuditSession, profile_id: str) -> ManualMetadataView:
+    """Present manual columns and exact source samples without loading audit inputs."""
+    profile_view = _export_profile_view(load_profile(profile_id))
+    sample_roles = tuple(item for item in session.mapping.roles if item.role is ColumnRole.SAMPLE)
+    if len(sample_roles) != 1 or sample_roles[0].selected is None:
+        raise ValueError("mapping requires a selected SAMPLE column")
+    selected = sample_roles[0].selected
+    headers = session.sheet.headers
+    if type(selected.index) is not int or not 0 <= selected.index < len(headers):
+        raise ValueError("invalid SAMPLE column index")
+    if selected.header != headers[selected.index]:
+        raise ValueError("selected SAMPLE header does not match the sheet")
+    rows = []
+    seen = set()
+    for row in session.sheet.rows:
+        if len(row.cells) != len(headers):
+            raise ValueError("source row cell count does not match headers")
+        if type(row.row_number) is not int:
+            raise ValueError("source row number must be an integer")
+        if row.row_number in seen:
+            raise ValueError("duplicate source row number")
+        seen.add(row.row_number)
+        rows.append(ManualMetadataRowView(row.row_number, row.cells[selected.index]))
+    return ManualMetadataView(profile_view, manual_profile_columns(profile_view), tuple(rows))
+
+
+@dataclass(frozen=True)
 class SessionExportPlan:
     profile_view: ExportProfileView
     plan: ExportPlan

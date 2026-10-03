@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
@@ -9,6 +10,98 @@ from fastq_sheet_audit.presentation import present_workflow
 from fastq_sheet_audit.read_mode import ReadMode
 from fastq_sheet_audit.sheet import load_sheet
 from fastq_sheet_audit.workflow import build_workflow_snapshot
+
+
+@pytest.mark.parametrize("profile_id, names", [
+    ("generic", ()), ("nfcore-rnaseq-3.27.0", ("strandedness",)),
+    ("nfcore-methylseq-4.2.0", ("genome",)), ("nfcore-smrnaseq-2.4.1", ()),
+    ("nfcore-viralrecon-3.0.0-illumina", ()),
+    ("nfcore-viralrecon-3.0.0-nanopore", ("barcode",)),
+])
+def test_manual_metadata_profiles_and_exact_source_rows(tmp_path, profile_id, names):
+    from fastq_sheet_audit.sheet import SampleSheet, SheetRow
+    from fastq_sheet_audit.column_mapping import ColumnRole
+    session = session_fixture(tmp_path)
+    sheet = SampleSheet(("r1", "Exact sample"), (
+        SheetRow(19, ("first", "  α Café  ")),
+        SheetRow(4, ("second", "=SUM(A1)")),
+        SheetRow(8, ("third", "+01")),
+    ))
+    session = replace(session, sheet=sheet, mapping=map_columns(sheet, {ColumnRole.SAMPLE: 1}))
+    before = replace(session)
+    view = controller.manual_metadata_view(session, profile_id)
+    assert tuple(column.name for column in view.columns) == names
+    assert view.profile_view == next(p for p in controller.export_profile_views() if p.profile_id == profile_id)
+    assert view.rows == (
+        controller.ManualMetadataRowView(19, "  α Café  "),
+        controller.ManualMetadataRowView(4, "=SUM(A1)"),
+        controller.ManualMetadataRowView(8, "+01"),
+    )
+    assert isinstance(view.columns, tuple) and isinstance(view.rows, tuple)
+    assert controller.manual_metadata_view(session, profile_id) == view
+    assert session == before
+    with pytest.raises(FrozenInstanceError):
+        view.rows = ()
+    with pytest.raises(FrozenInstanceError):
+        view.rows[0].sample = "changed"
+    with pytest.raises(FrozenInstanceError):
+        view.profile_view.notes = "changed"
+
+
+@pytest.mark.parametrize("problem", [
+    "missing", "wrong_header", "case_header", "negative_index", "large_index", "bool_index",
+    "short_row", "surplus_row", "duplicate_rows", "bool_row", "string_row", "float_row",
+])
+def test_manual_metadata_rejects_inconsistent_state(tmp_path, problem):
+    from fastq_sheet_audit.column_mapping import ColumnRole
+    from fastq_sheet_audit.sheet import SheetRow
+    session = session_fixture(tmp_path)
+    sample = session.mapping.for_role(ColumnRole.SAMPLE)
+    if problem in {"missing", "wrong_header", "case_header", "negative_index", "large_index", "bool_index"}:
+        selected = sample.selected
+        if problem == "missing":
+            selected = None
+        elif problem in {"wrong_header", "case_header"}:
+            selected = replace(selected, header="stale" if problem == "wrong_header" else "SAMPLE")
+        else:
+            selected = replace(selected, index={"negative_index": -1, "large_index": 99, "bool_index": False}[problem])
+        mapping = replace(session.mapping, roles=tuple(
+            replace(role, selected=selected) if role.role is ColumnRole.SAMPLE else role
+            for role in session.mapping.roles))
+        session = replace(session, mapping=mapping)
+    else:
+        row = session.sheet.rows[0]
+        if problem == "duplicate_rows":
+            rows = (row, row)
+        elif problem in {"short_row", "surplus_row"}:
+            rows = (replace(row, cells=row.cells[:-1] if problem == "short_row" else row.cells + ("extra",)),)
+        else:
+            rows = (SheetRow({"bool_row": True, "string_row": "2", "float_row": 2.0}[problem], row.cells),)
+        session = replace(session, sheet=replace(session.sheet, rows=rows))
+    with pytest.raises(ValueError):
+        controller.manual_metadata_view(session, "generic")
+
+
+def test_manual_metadata_only_loads_bundled_profile_and_preserves_session(tmp_path, monkeypatch):
+    session = session_fixture(tmp_path)
+    before = replace(session)
+    original_open = Path.open
+    def fail(*args, **kwargs):
+        pytest.fail("manual metadata accessed audit inputs, planning, network, or writes")
+    def resource_open(path, mode="r", *args, **kwargs):
+        assert path.parent.name == "profile_data" and path.suffix == ".json"
+        assert mode == "r"
+        return original_open(path, mode, *args, **kwargs)
+    for name in ("load_sheet", "scan_fastqs", "build_export_plan", "plan_session_export"):
+        monkeypatch.setattr(controller, name, fail)
+    monkeypatch.setattr(Path, "open", resource_open)
+    for name in ("write_text", "write_bytes", "rename", "unlink", "mkdir"):
+        monkeypatch.setattr(Path, name, fail)
+    monkeypatch.setattr("socket.socket", fail)
+    view = controller.manual_metadata_view(session, "nfcore-viralrecon-3.0.0-nanopore")
+    assert view.profile_view.input_kind == "barcode_mapping"
+    assert view.columns[0].name == "barcode"
+    assert session == before
 
 
 def inputs(tmp_path, paired=True):
