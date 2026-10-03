@@ -1,4 +1,4 @@
-"""Initial native GUI shell; controllers and audit operations are not connected.
+"""Native read-only audit GUI; export and adjudication are not connected.
 
 Manual smoke command: python -m fastq_sheet_audit.gui
 """
@@ -47,11 +47,10 @@ PAIR_COLUMNS = (
 )
 
 
-def read_mode_value(display: str) -> str:
-    for label, value in READ_MODE_CHOICES:
-        if label == display:
-            return value
-    raise ValueError(f"unknown read mode display value: {display!r}")
+def read_mode_value(display: str) -> Any:
+    from .gui_controller import read_mode_from_label
+
+    return read_mode_from_label(display)
 
 
 @dataclass(frozen=True)
@@ -69,6 +68,76 @@ class ApplicationWindow:
     summary_values: tuple[tuple[str, Any], ...]
     audit_button: Any
     export_button: Any
+
+
+def browse_fastq_directory(variable: Any, *, parent: Any = None) -> None:
+    from tkinter import filedialog
+
+    selected = filedialog.askdirectory(parent=parent, title="Choose FASTQ directory")
+    if selected:
+        variable.set(selected)
+
+
+def browse_sample_sheet(variable: Any, *, parent: Any = None) -> None:
+    from tkinter import filedialog
+
+    selected = filedialog.askopenfilename(
+        parent=parent, title="Choose sample sheet",
+        filetypes=(("CSV sheets", "*.csv"), ("TSV sheets", "*.tsv")),
+    )
+    if selected:
+        variable.set(selected)
+
+
+def clear_audit_view(application: ApplicationWindow) -> None:
+    for table in (application.findings_table, application.inventory_table, application.pairing_table):
+        children = table.get_children()
+        if children:
+            table.delete(*children)
+    for _, variable in application.summary_values:
+        variable.set("—")
+    application.export_button.configure(state="disabled")
+
+
+def render_workflow(application: ApplicationWindow, view: Any) -> None:
+    """Render a presentation view with no scientific interpretation."""
+    clear_audit_view(application)
+    for key, variable in application.summary_values:
+        value = getattr(view.summary, key)
+        variable.set(("Ready" if value else "Not ready") if key == "ready_for_export" else str(value))
+    def cells(values: tuple) -> tuple:
+        return tuple("" if value is None else value for value in values)
+    for row in view.findings:
+        application.findings_table.insert("", "end", values=cells((
+            row.source, row.severity, row.code, row.message, row.row_number, row.sample, row.path,
+        )))
+    for row in view.inventory:
+        application.inventory_table.insert("", "end", values=cells((
+            row.relative_path, row.category, row.sample, row.read_role, row.lane, row.chunk,
+        )))
+    for row in view.pairs:
+        application.pairing_table.insert("", "end", values=cells((
+            row.key_text, row.r1_candidate_count, row.r2_candidate_count, row.effective_r1,
+            row.effective_r2, row.unresolved_r1_count, row.unresolved_r2_count, row.confirmed, row.resolved,
+        )))
+
+
+def audit_action(application: ApplicationWindow) -> None:
+    from .gui_controller import audit_inputs
+
+    clear_audit_view(application)
+    application.status.set("Auditing…")
+    try:
+        view = audit_inputs(application.fastq_directory.get(), application.sample_sheet.get(),
+                            application.read_mode.get())
+    except (OSError, ValueError) as error:
+        application.status.set(f"Audit failed: {error}")
+        return
+    render_workflow(application, view)
+    application.status.set(
+        f"Audit complete: {view.summary.inventory_count} FASTQs, "
+        f"{view.summary.error_count} errors, {view.summary.warning_count} warnings."
+    )
 
 
 def build_application(root: Any) -> ApplicationWindow:
@@ -96,12 +165,13 @@ def build_application(root: Any) -> ApplicationWindow:
     )):
         ttk.Label(inputs, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(inputs, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=4)
-        # File dialogs and their controller integration come in a later task.
-        ttk.Button(inputs, text="Browse", state="disabled").grid(row=row, column=2, padx=(8, 0), pady=4)
+        browse = browse_fastq_directory if row == 0 else browse_sample_sheet
+        ttk.Button(inputs, text="Browse", command=lambda action=browse, value=variable:
+                   action(value, parent=root)).grid(row=row, column=2, padx=(8, 0), pady=4)
     ttk.Label(inputs, text="Read mode").grid(row=2, column=0, sticky="w", pady=4)
     ttk.Combobox(inputs, textvariable=read_mode, state="readonly",
                  values=tuple(label for label, _ in READ_MODE_CHOICES)).grid(row=2, column=1, sticky="w")
-    audit_button = ttk.Button(inputs, text="Audit", command=lambda: status.set("Audit controller is not connected yet."))
+    audit_button = ttk.Button(inputs, text="Audit")
     audit_button.grid(row=2, column=2, padx=(8, 0))
 
     notebook = ttk.Notebook(frame)
@@ -151,9 +221,11 @@ def build_application(root: Any) -> ApplicationWindow:
     export_button = ttk.Button(export_tab, text="Export", state="disabled")
     export_button.grid(row=5, column=1, sticky="e", pady=8)
     ttk.Label(frame, textvariable=status, wraplength=850).grid(row=2, column=0, sticky="ew", pady=(10, 0))
-    return ApplicationWindow(root, fastq_directory, sample_sheet, read_mode, status, notebook,
+    application = ApplicationWindow(root, fastq_directory, sample_sheet, read_mode, status, notebook,
                              findings_table, inventory_table, pairing_table, tuple(summary_values),
                              audit_button, export_button)
+    audit_button.configure(command=lambda: audit_action(application))
+    return application
 
 
 def main() -> int:
