@@ -892,10 +892,27 @@ def build_application(root: Any) -> ApplicationWindow:
     return application
 
 
+def set_application_icon(root: Any) -> None:
+    """Load the bundled PNG without making optional window decoration fatal."""
+    import tkinter as tk
+    from importlib.resources import as_file, files
+
+    try:
+        resource = files("fastq_sheet_audit").joinpath("assets", "app_icon.png")
+        with as_file(resource) as path:
+            icon = tk.PhotoImage(master=root, file=str(path))
+        root.iconphoto(True, icon)
+        root._app_icon = icon  # Keep the image alive for the root's lifetime.
+    except Exception:
+        # Icon/resource/Tk failures must not prevent the application launching.
+        pass
+
+
 def main() -> int:
     import tkinter as tk
 
     root = tk.Tk()
+    set_application_icon(root)
     application = build_application(root)
     root.mainloop()
     return 0

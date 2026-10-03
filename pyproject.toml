@@ -32,6 +32,7 @@ version = {attr = "fastq_sheet_audit.__version__"}
 where = ["src"]
 
 [tool.setuptools.package-data]
+"fastq_sheet_audit" = ["assets/*.png"]
 "fastq_sheet_audit.profile_data" = ["*.json"]
 
 [tool.pytest.ini_options]

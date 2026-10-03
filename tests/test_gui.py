@@ -77,11 +77,64 @@ def test_main_startup_boundary_without_display(monkeypatch):
     fake_tk = SimpleNamespace(Tk=Mock(return_value=root))
     monkeypatch.setitem(sys.modules, "tkinter", fake_tk)
     builder = Mock()
+    icon_setter = Mock()
+    startup = Mock()
+    startup.attach_mock(icon_setter, "icon")
+    startup.attach_mock(builder, "build")
+    monkeypatch.setattr(gui, "set_application_icon", icon_setter)
     monkeypatch.setattr(gui, "build_application", builder)
     assert gui.main() == 0
     fake_tk.Tk.assert_called_once_with()
     builder.assert_called_once_with(root)
+    icon_setter.assert_called_once_with(root)
+    assert [call[0] for call in startup.mock_calls] == ["icon", "build"]
     root.mainloop.assert_called_once_with()
+
+
+def test_bundled_icon_resource_is_reachable():
+    from importlib.resources import files
+    resource = files("fastq_sheet_audit").joinpath("assets", "app_icon.png")
+    assert resource.is_file()
+    assert resource.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_application_icon_uses_photoimage_and_retains_reference(monkeypatch):
+    from importlib.resources import as_file, files
+    root = Mock()
+    icon = object()
+    photo_image = Mock(return_value=icon)
+    monkeypatch.setitem(sys.modules, "tkinter", SimpleNamespace(PhotoImage=photo_image))
+    gui.set_application_icon(root)
+    with as_file(files("fastq_sheet_audit").joinpath("assets", "app_icon.png")) as path:
+        photo_image.assert_called_once_with(master=root, file=str(path))
+    root.iconphoto.assert_called_once_with(True, icon)
+    assert root._app_icon is icon
+
+
+@pytest.mark.parametrize("error", [OSError("missing icon"), RuntimeError("unexpected image failure")])
+def test_application_icon_loading_failure_is_nonfatal(monkeypatch, error):
+    root = Mock()
+    monkeypatch.setitem(sys.modules, "tkinter", SimpleNamespace(PhotoImage=Mock(side_effect=error)))
+    gui.set_application_icon(root)
+    root.iconphoto.assert_not_called()
+    assert "_app_icon" not in root.__dict__
+
+
+def test_application_icon_resource_failure_is_nonfatal(monkeypatch):
+    photo_image = Mock()
+    monkeypatch.setitem(sys.modules, "tkinter", SimpleNamespace(PhotoImage=photo_image))
+    monkeypatch.setattr("importlib.resources.files", Mock(side_effect=OSError("resource unavailable")))
+    root = Mock()
+    gui.set_application_icon(root)
+    photo_image.assert_not_called()
+    root.iconphoto.assert_not_called()
+
+
+def test_application_icon_tk_iconphoto_failure_is_nonfatal(monkeypatch):
+    monkeypatch.setitem(sys.modules, "tkinter", SimpleNamespace(PhotoImage=Mock(return_value=object())))
+    root = Mock()
+    root.iconphoto.side_effect = RuntimeError("window icon unsupported")
+    gui.set_application_icon(root)
 
 
 def test_gui_contains_no_audit_or_network_implementation():
@@ -93,7 +146,7 @@ def test_gui_contains_no_audit_or_network_implementation():
             imports.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             imports.add(node.module)
-    assert imports <= {"__future__", "dataclasses", "typing", "tkinter", "gui_controller"}
+    assert imports <= {"__future__", "dataclasses", "typing", "tkinter", "gui_controller", "importlib.resources"}
     called_names = {
         node.func.id for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
