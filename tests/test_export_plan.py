@@ -23,7 +23,7 @@ UNASSIGN = RoleDecision(RoleDecisionKind.UNASSIGN, None)
 
 def record(name):
     relative = Path(name)
-    return InventoryRecord(Path("/scan") / relative, relative, parse_fastq_name(relative.name), InventoryCategory.READ)
+    return InventoryRecord(Path.cwd() / "scan" / relative, relative, parse_fastq_name(relative.name), InventoryCategory.READ)
 
 
 def evidence(single=False, mixed=False, selected=False, unassign=False):
@@ -65,13 +65,13 @@ def plan(args, profile="generic", mode=ExportMode.RELATIVE_TO_ROOT, **kwargs):
 def test_generic_paired_and_exact_sample_text():
     result = plan(evidence())
     assert result.result.sheet.headers == ("sample", "r1", "r2")
-    assert result.result.sheet.rows[0].cells == (" A ", "run/A_S1_R1.fastq", "run/A_S1_R2.fastq")
+    assert result.result.sheet.rows[0].cells == (" A ", str(Path("run/A_S1_R1.fastq")), str(Path("run/A_S1_R2.fastq")))
     assert result.result.validation.ok
 
 
 @pytest.mark.parametrize("mode, options, expected", [
-    (ExportMode.LOCAL_ABSOLUTE, {}, "/scan/run/A_S1_R1.fastq"),
-    (ExportMode.RELATIVE_TO_ROOT, {}, "run/A_S1_R1.fastq"),
+    (ExportMode.LOCAL_ABSOLUTE, {}, str(record("run/A_S1_R1.fastq").path)),
+    (ExportMode.RELATIVE_TO_ROOT, {}, str(Path("run/A_S1_R1.fastq"))),
     (ExportMode.REBASED_ROOT, {"target_root": "/data/项目", "target_style": TargetStyle.POSIX}, "/data/项目/run/A_S1_R1.fastq"),
     (ExportMode.REBASED_ROOT, {"target_root": "D:\\项目", "target_style": TargetStyle.WINDOWS}, "D:\\项目\\run\\A_S1_R1.fastq"),
 ])
@@ -84,8 +84,8 @@ def test_rendered_path_modes(mode, options, expected):
 def test_selected_reads_exported_instead_of_original_reconciliation_cells():
     args = evidence(selected=True)
     result = plan(args)
-    assert result.rows[0].values["r1"] == "run/A_S01_R1.fastq"
-    assert result.rows[0].values["r2"] == "run/A_S01_R2.fastq"
+    assert result.rows[0].values["r1"] == str(Path("run/A_S01_R1.fastq"))
+    assert result.rows[0].values["r2"] == str(Path("run/A_S01_R2.fastq"))
     assert result.rows[0].values["r1"] != args[0].rows[0].cells[1]
     assert result.rows[0].values["r2"] != args[0].rows[0].cells[2]
 
@@ -126,7 +126,8 @@ def test_defaults_not_applied_and_roles_not_inferred_from_names():
                                                    default_value="auto" if column.source_role is None else None)
                                             for i, column in enumerate(profile.columns)))
     result = build_export_plan(*evidence(), profile, ExportMode.RELATIVE_TO_ROOT)
-    assert result.rows[0].values == {"unusual_0": " A ", "unusual_1": "run/A_S1_R1.fastq", "unusual_2": "run/A_S1_R2.fastq"}
+    assert result.rows[0].values == {"unusual_0": " A ", "unusual_1": str(Path("run/A_S1_R1.fastq")),
+                                    "unusual_2": str(Path("run/A_S1_R2.fastq"))}
     assert result.result.sheet.rows[0].cells[-1] == ""
     assert result.result.validation.findings[0].column == "unusual_3"
 

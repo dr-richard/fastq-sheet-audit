@@ -19,3 +19,76 @@ jobs:
       - run: python -m pip install -e '.[dev]'
       - run: python -m pytest -q
       - run: fastq-sheet-audit --version
+
+  cross-platform:
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q
+      - run: fastq-sheet-audit --version
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Verify wheel installation outside the checkout
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/package-validation"
+          source "$RUNNER_TEMP/package-validation/bin/activate"
+          python -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          fastq-sheet-audit --version
+          python - <<'PY'
+          import importlib.metadata as metadata
+          import importlib.resources as resources
+          import fastq_sheet_audit
+
+          distribution = metadata.distribution("fastq-sheet-audit")
+          assert distribution.version == fastq_sheet_audit.__version__
+          expected_entries = {
+              ("console_scripts", "fastq-sheet-audit"): "fastq_sheet_audit.cli:main",
+              ("gui_scripts", "fastq-sheet-audit-gui"): "fastq_sheet_audit.gui:main",
+          }
+          for (group, name), value in expected_entries.items():
+              entries = [entry for entry in distribution.entry_points
+                         if entry.group == group and entry.name == name]
+              assert len(entries) == 1 and entries[0].value == value
+              assert callable(entries[0].load())  # Resolve only; never launch Tk.
+              print(f"{group}: {name} = {value}")
+
+          expected_profiles = {
+              "generic.json",
+              "nfcore-methylseq-4.2.0.json",
+              "nfcore-rnaseq-3.27.0.json",
+              "nfcore-smrnaseq-2.4.1.json",
+              "nfcore-viralrecon-3.0.0-illumina.json",
+              "nfcore-viralrecon-3.0.0-nanopore.json",
+          }
+          bundled = resources.files("fastq_sheet_audit.profile_data")
+          profiles = {item.name for item in bundled.iterdir() if item.name.endswith(".json")}
+          assert expected_profiles <= profiles
+          installed_files = {str(path).replace("\\", "/") for path in distribution.files}
+          for name in sorted(profiles):
+              assert f"fastq_sheet_audit/profile_data/{name}" in installed_files
+              assert bundled.joinpath(name).read_text(encoding="utf-8")
+              print(f"Bundled profile: {name}")
+          print(f"Installed version: {distribution.version}")
+          PY

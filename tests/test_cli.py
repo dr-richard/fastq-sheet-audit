@@ -79,6 +79,8 @@ def test_automatic_ambiguity_remains_unresolved_and_preserves_candidates(tmp_pat
     sheet, root, _, _ = inputs(tmp_path)
     alternate = root / "a_R1.fastq"
     alternate.write_bytes(b"alternate evidence")
+    if alternate.samefile(root / "A_R1.fastq"):
+        pytest.skip("filesystem cannot represent distinct case-only filenames")
     destination = tmp_path / "report.json"
     assert cli.main(args(sheet, root, "--json", str(destination))) == 1
     output = capsys.readouterr().out

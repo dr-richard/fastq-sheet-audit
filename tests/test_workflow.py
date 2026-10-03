@@ -124,6 +124,8 @@ def test_selection_does_not_suppress_raw_case_collisions(tmp_path):
     args = setup_case(tmp_path, ("A_R1.fastq", "a_R1.fastq", "A_R2.fastq"), [
         ("A", "A_R1.fastq", "A_R2.fastq"), ("a", "a_R1.fastq", ""),
     ])
+    if (tmp_path / "A_R1.fastq").samefile(tmp_path / "a_R1.fastq"):
+        pytest.skip("filesystem cannot represent distinct case-only filenames")
     group, = group_pairs(args[2])
     choices = PairDecision(group.key, RoleDecision(RoleDecisionKind.SELECT, group.r1[0]), AUTO, True)
     snapshot = build_workflow_snapshot(*args, tmp_path, decisions={group.key: choices})
@@ -182,6 +184,8 @@ def test_case_collision_affects_summary(tmp_path):
     args = setup_case(tmp_path, ("A_R1.fastq", "a_R1.fastq"), [
         ("A", "A_R1.fastq", ""), ("a", "a_R1.fastq", ""),
     ])
+    if (tmp_path / "A_R1.fastq").samefile(tmp_path / "a_R1.fastq"):
+        pytest.skip("filesystem cannot represent distinct case-only filenames")
     snapshot = build_workflow_snapshot(*args, tmp_path, read_mode=ReadMode.SINGLE)
     assert len(snapshot.case_collisions) == 1
     assert snapshot.has_warnings

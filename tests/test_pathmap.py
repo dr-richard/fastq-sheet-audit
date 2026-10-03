@@ -9,11 +9,11 @@ from fastq_sheet_audit.pathmap import ExportMode, TargetStyle, preview_paths, re
 
 def record(relative="run1/A_R1.fastq.gz"):
     path = Path(relative)
-    return InventoryRecord(Path("/local/scan") / path, path, None, InventoryCategory.UNPARSED)
+    return InventoryRecord(Path.cwd() / "local" / "scan" / path, path, None, InventoryCategory.UNPARSED)
 
 
 def test_local_absolute_is_not_rewritten():
-    item = replace(record(), path=Path("/local/scan/../linked/A_R1.fastq.gz"))
+    item = replace(record(), path=Path.cwd() / "local/scan/../linked/A_R1.fastq.gz")
     assert render_path(item, ExportMode.LOCAL_ABSOLUTE) == str(item.path)
 
 

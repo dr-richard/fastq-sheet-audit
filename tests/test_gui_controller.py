@@ -461,7 +461,10 @@ def session_fixture(tmp_path, mode="Auto", ambiguous=False):
         original_scan = controller.scan_fastqs
         records = original_scan(root)
         alias = root.parent / "alias.fastq"
-        alias.symlink_to(records[0].path)
+        try:
+            alias.symlink_to(records[0].path)
+        except (OSError, NotImplementedError) as error:
+            pytest.skip(f"symlinks unsupported: {error}")
         records.append(replace(records[0], path=alias))
         sheet = load_sheet(path)
         mapping = map_columns(sheet)
@@ -604,6 +607,8 @@ def test_session_immutability_and_no_reloading_scanning_reads_writes_or_network(
 def test_adjudication_keeps_raw_collisions_and_reconciliation_findings(tmp_path):
     root, path = inputs(tmp_path)
     (root / "a_R1.fastq").touch()
+    if (root / "a_R1.fastq").samefile(root / "A_R1.fastq"):
+        pytest.skip("filesystem cannot represent distinct case-only filenames")
     session = controller.audit_session(str(root), str(path), "Auto")
     choice = controller.pair_adjudication_views(session)[0].r1_choices[0].display
     updated = controller.apply_pair_adjudication(session, 0, choice, "Automatic", True)

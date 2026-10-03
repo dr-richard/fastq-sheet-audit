@@ -79,7 +79,7 @@ def test_all_reconciliation_fields_assignments_and_separate_counts():
     report = reporting.build_workflow_report(snapshot)
     assert report.reconciliation_findings == (
         reporting.ReconciliationFindingReport("E", "error", "exact message", 9, " A ",
-                                               "relative α", "/related/B", "r2"),
+                                               "relative α", str(Path("/related/B")), "r2"),
         reporting.ReconciliationFindingReport("W", "warning", "warning", None, None, None, None, None))
     assert report.reconciliation_assignments == (reporting.AssignmentReport(
         9, " A ", "r1", " original cell ", "relative α", report.inventory[0]),)
