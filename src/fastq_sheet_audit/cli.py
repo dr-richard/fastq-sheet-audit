@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .column_mapping import map_columns
+from .column_mapping import ColumnRole, map_columns
 from .inventory import scan_fastqs
 from .presentation import present_workflow
 from .read_mode import ReadMode
@@ -16,6 +16,16 @@ from .report_io import write_workflow_report_json
 from .reporting import build_workflow_report
 from .sheet import load_sheet
 from .workflow import build_workflow_snapshot
+
+
+def _positive_column_number(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("column number must be a positive 1-based integer") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError("column number must be a positive 1-based integer")
+    return number
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +37,14 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("sheet", type=Path, help="CSV/TSV sample sheet with unambiguous SAMPLE and R1 columns")
     check.add_argument("--fastq-dir", type=Path, required=True, help="FASTQ scan root directory")
     check.add_argument("--read-mode", choices=tuple(mode.value for mode in ReadMode), default="auto")
+    check.add_argument("--sample-column", type=_positive_column_number, metavar="N",
+                       help="explicit SAMPLE column number (1-based)")
+    check.add_argument("--r1-column", type=_positive_column_number, metavar="N",
+                       help="explicit R1 column number (1-based)")
+    r2 = check.add_mutually_exclusive_group()
+    r2.add_argument("--r2-column", type=_positive_column_number, metavar="N",
+                    help="explicit R2 column number (1-based)")
+    r2.add_argument("--no-r2-column", action="store_true", help="explicitly leave R2 unmapped")
     check.add_argument("--json", dest="json_path", type=Path, help="publish a structured v0.2 JSON report")
     check.add_argument("--overwrite-report", action="store_true",
                        help="allow replacing an ordinary JSON report file; input paths remain protected")
@@ -41,12 +59,27 @@ def main(argv: list[str] | None = None) -> int:
         if not args.fastq_dir.is_dir():
             raise ValueError(f"FASTQ root does not exist or is not a directory: {args.fastq_dir}")
         sheet = load_sheet(args.sheet)
-        mapping = map_columns(sheet)
+        overrides = {}
+        for role, number in ((ColumnRole.SAMPLE, args.sample_column),
+                             (ColumnRole.R1, args.r1_column), (ColumnRole.R2, args.r2_column)):
+            if number is not None:
+                overrides[role] = number - 1
+        if args.no_r2_column:
+            overrides[ColumnRole.R2] = None
+        mapping = map_columns(sheet, overrides if overrides else None)
         if mapping.ambiguous:
             roles = ", ".join(item.role.name for item in mapping.ambiguous)
-            raise ValueError(f"Ambiguous column mapping: {roles}. Explicit mapping is required.")
+            candidates = "; ".join(
+                f"{item.role.name} candidates: " + ", ".join(
+                    f"{column.index + 1}:{column.header!r}" for column in item.candidates)
+                for item in mapping.ambiguous)
+            raise ValueError(f"Ambiguous column mapping: {roles}. Explicit mapping is required. {candidates}")
         if not mapping.complete:
-            raise ValueError("Column mapping requires SAMPLE and R1 mappings.")
+            missing = ", ".join(role.name for role in (ColumnRole.SAMPLE, ColumnRole.R1)
+                                if mapping.for_role(role).selected is None)
+            columns = ", ".join(f"{index + 1}:{header!r}" for index, header in enumerate(sheet.headers))
+            raise ValueError(f"Column mapping requires SAMPLE and R1 mappings. Missing required roles: {missing}. "
+                             f"Available columns: {columns}")
         fastq_root = args.fastq_dir.absolute()
         inventory = scan_fastqs(fastq_root)
         snapshot = build_workflow_snapshot(sheet, mapping, inventory, fastq_root,

@@ -294,3 +294,138 @@ def test_cli_only_uses_v2_pipeline_and_publication_apis():
     assert not calls.intersection({"open", "serialize_workflow_report_json", "write_text_atomic", "write_sheet_atomic"})
     attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
     assert not attributes.intersection({"dumps", "dump", "replace", "NamedTemporaryFile"})
+
+
+@pytest.mark.parametrize("headers,cells,options", [
+    ("sample,sampleid,r1,r2", "wrong,A,A_R1.fastq,A_R2.fastq", ["--sample-column", "2"]),
+    ("sample,r1,read1,r2", "A,missing.fastq,A_R1.fastq,A_R2.fastq", ["--r1-column", "3"]),
+    ("sample,r1,r2,read2", "A,A_R1.fastq,missing.fastq,A_R2.fastq", ["--r2-column", "4"]),
+    ("specimen,forward,reverse", "A,A_R1.fastq,A_R2.fastq",
+     ["--sample-column", "1", "--r1-column", "2", "--r2-column", "3"]),
+    ("r1,r2,specimen", "A_R1.fastq,A_R2.fastq,A", ["--sample-column", "3"]),
+])
+def test_explicit_mapping_success_and_report_evidence(tmp_path, capsys, headers, cells, options):
+    sheet, root, _, _ = inputs(tmp_path)
+    sheet.write_text(headers + "\n" + cells + "\n")
+    destination = tmp_path / "mapped.json"
+    assert cli.main(args(sheet, root, *options, "--json", str(destination))) == 0
+    terminal = capsys.readouterr()
+    assert terminal.err == ""
+    assert terminal.out == ("Inventory: 2 | Errors: 0 | Warnings: 0 | Unresolved pairs: 0 | "
+                            "Read layout: paired | Ready for export: yes\n")
+    report = json.loads(destination.read_text())
+    assert report["summary"]["ready_for_export"] is True
+    assignments = report["reconciliation_assignments"]
+    assert [(a["sample"], a["role"], a["cell_value"]) for a in assignments] == [
+        ("A", "r1", "A_R1.fastq"), ("A", "r2", "A_R2.fastq")]
+
+
+def test_ambiguous_optional_r2_explicitly_unmapped_retains_disk_evidence(tmp_path, capsys):
+    sheet, root, _, r2 = inputs(tmp_path)
+    sheet.write_text("sample,r1,r2,read2\nA,A_R1.fastq,A_R2.fastq,missing.fastq\n")
+    destination = tmp_path / "report.json"
+    assert cli.main(args(sheet, root, "--no-r2-column", "--json", str(destination))) == 1
+    output = capsys.readouterr().out
+    assert "warning reconciliation UNLISTED_FASTQ" in output
+    report = json.loads(destination.read_text())
+    assert [a["role"] for a in report["reconciliation_assignments"]] == ["r1"]
+    assert report["reconciliation_findings"][0]["path"] == str(r2)
+    assert report["summary"]["read_layout"] == "paired"
+
+
+@pytest.mark.parametrize("flag", ["--sample-column", "--r1-column", "--r2-column"])
+@pytest.mark.parametrize("number", ["0", "-1", "word", "1.5"])
+def test_nonpositive_or_noninteger_numbers_are_parser_errors(tmp_path, capsys, flag, number):
+    sheet, root, _, _ = inputs(tmp_path)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(args(sheet, root, flag, number))
+    assert caught.value.code == 2
+    assert "positive 1-based integer" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--sample-column", "--r1-column", "--r2-column"])
+def test_out_of_range_rejected_before_scan(tmp_path, capsys, monkeypatch, flag):
+    sheet, root, _, _ = inputs(tmp_path)
+    scan = Mock()
+    monkeypatch.setattr(cli, "scan_fastqs", scan)
+    assert cli.main(args(sheet, root, flag, "4")) == 2
+    assert "invalid column index" in assert_error(capsys)
+    scan.assert_not_called()
+
+
+@pytest.mark.parametrize("options", [
+    ["--sample-column", "2"],  # explicit SAMPLE conflicts with automatic R1
+    ["--r1-column", "1"],
+    ["--sample-column", "1", "--r1-column", "1"],
+    ["--r1-column", "2", "--r2-column", "2"],
+])
+def test_physical_column_conflict_not_silently_adjusted(tmp_path, capsys, monkeypatch, options):
+    sheet, root, _, _ = inputs(tmp_path)
+    scan = Mock()
+    monkeypatch.setattr(cli, "scan_fastqs", scan)
+    assert cli.main(args(sheet, root, *options)) == 2
+    assert "assigned to multiple roles" in assert_error(capsys)
+    scan.assert_not_called()
+
+
+def test_r2_flags_mutually_exclusive_at_parser_level(tmp_path, capsys):
+    sheet, root, _, _ = inputs(tmp_path)
+    with pytest.raises(SystemExit) as caught:
+        cli.main(args(sheet, root, "--r2-column", "3", "--no-r2-column"))
+    assert caught.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+def test_partial_override_remaining_ambiguity_lists_exact_candidates(tmp_path, capsys, monkeypatch):
+    sheet, root, _, _ = inputs(tmp_path)
+    sheet.write_text(" sample ,sampleid,r1,read1,r2\n")
+    scan = Mock()
+    monkeypatch.setattr(cli, "scan_fastqs", scan)
+    assert cli.main(args(sheet, root, "--r1-column", "3")) == 2
+    assert assert_error(capsys) == (
+        "fastq-sheet-audit: error: Ambiguous column mapping: SAMPLE. Explicit mapping is required. "
+        "SAMPLE candidates: 1:' sample ', 2:'sampleid'\n")
+    scan.assert_not_called()
+
+
+def test_multiple_ambiguous_roles_all_listed(tmp_path, capsys):
+    sheet, root, _, _ = inputs(tmp_path)
+    sheet.write_text("sample,sampleid,r1,read1,r2,read2\n")
+    assert cli.main(args(sheet, root)) == 2
+    error = assert_error(capsys)
+    assert "SAMPLE candidates: 1:'sample', 2:'sampleid'" in error
+    assert "R1 candidates: 3:'r1', 4:'read1'" in error
+    assert "R2 candidates: 5:'r2', 6:'read2'" in error
+
+
+@pytest.mark.parametrize("options,missing", [([], "SAMPLE, R1"), (["--sample-column", "1"], "R1")])
+def test_incomplete_mapping_lists_missing_roles_and_all_exact_headers(tmp_path, capsys, monkeypatch, options, missing):
+    sheet, root, _, _ = inputs(tmp_path)
+    sheet.write_text(" specimen ,forward,read-2\n")
+    scan = Mock()
+    monkeypatch.setattr(cli, "scan_fastqs", scan)
+    assert cli.main(args(sheet, root, *options)) == 2
+    assert assert_error(capsys) == (
+        f"fastq-sheet-audit: error: Column mapping requires SAMPLE and R1 mappings. Missing required roles: {missing}. "
+        "Available columns: 1:' specimen ', 2:'forward', 3:'read-2'\n")
+    scan.assert_not_called()
+
+
+def test_exact_one_based_translation_and_omitted_roles(tmp_path, monkeypatch):
+    from fastq_sheet_audit.column_mapping import ColumnRole
+    sheet, root, _, _ = inputs(tmp_path)
+    sheet.write_text("identifier,r1,r2\nA,A_R1.fastq,A_R2.fastq\n")
+    mapper = Mock(wraps=map_columns)
+    monkeypatch.setattr(cli, "map_columns", mapper)
+    assert cli.main(args(sheet, root, "--sample-column", "1", "--r2-column", "3")) == 0
+    assert mapper.call_args.args[1] == {ColumnRole.SAMPLE: 0, ColumnRole.R2: 2}
+
+
+def test_flag_help_describes_one_based_columns():
+    parser = cli.build_parser()
+    check = next(action for action in parser._actions if isinstance(action, cli.argparse._SubParsersAction)).choices["check"]
+    for flag in ("--sample-column", "--r1-column", "--r2-column"):
+        action = next(action for action in check._actions if flag in action.option_strings)
+        assert "1-based" in action.help
+    assert not {"--no-sample-column", "--no-r1-column"}.intersection(
+        flag for action in check._actions for flag in action.option_strings)
