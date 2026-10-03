@@ -54,11 +54,37 @@ best-effort race safety, not a guarantee against concurrent filesystem mutation.
 
 ## Installation
 
-Python 3.10 or newer is required. From a checkout of the v0.2 development branch:
+Python 3.10 or newer is required. Install the released package from
+[PyPI](https://pypi.org/project/fastq-sheet-audit/) using one of these methods.
+
+Preferred CLI application installation with pipx:
+
+```bash
+pipx install fastq-sheet-audit
+```
+
+Standard pip installation:
+
+```bash
+python -m pip install fastq-sheet-audit
+```
+
+uv tool installation:
+
+```bash
+uv tool install fastq-sheet-audit
+```
+
+Verify the installation:
+
+```bash
+fastq-sheet-audit --version
+```
+
+For development or installation from a source checkout:
 
 ```bash
 python -m pip install .
-fastq-sheet-audit --version
 ```
 
 The GUI uses standard-library tkinter/ttk and needs an available Tk installation
