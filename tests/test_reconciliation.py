@@ -35,6 +35,22 @@ def test_clean_pair(tmp_path):
     assert result.inventory == tuple(inventory)
 
 
+def test_repeated_sample_with_distinct_lane_pairs_is_clean(tmp_path):
+    lane1 = ("A_S1_L001_R1_001.fastq.gz", "A_S1_L001_R2_001.fastq.gz")
+    lane2 = ("A_S1_L002_R1_001.fastq.gz", "A_S1_L002_R2_001.fastq.gz")
+    sheet, mapping, inventory = setup_case(
+        tmp_path, (*lane1, *lane2), [("A", *lane1), ("A", *lane2)],
+    )
+    result = reconcile(sheet, mapping, inventory, tmp_path)
+    assert result.ok
+    assert result.findings == ()
+    assert len(result.assignments) == 4
+    assert {assignment.sample for assignment in result.assignments} == {"A"}
+    assert {assignment.row_number for assignment in result.assignments} == {2, 3}
+    assert len({assignment.path for assignment in result.assignments}) == 4
+    assert {assignment.record.parsed_name.lane for assignment in result.assignments} == {1, 2}
+
+
 def test_missing_listed_file(tmp_path):
     sheet, mapping, inventory = setup_case(tmp_path, [], [("A", "A_R1.fastq", "")])
     result = reconcile(sheet, mapping, inventory, tmp_path)
