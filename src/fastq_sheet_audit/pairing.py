@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Iterable
 
 from .inventory import InventoryCategory, InventoryRecord
@@ -13,7 +13,11 @@ from .naming import ReadRole
 
 @dataclass(frozen=True)
 class PairKey:
-    """Mate identity with casefolded sample and suffix; other fields are exact."""
+    """Mate identity with exact, host-independent relative directory spelling.
+
+    Only sample and suffix are casefolded. Pure POSIX directory equality and
+    hashing preserve case even when inventory paths came from Windows.
+    """
 
     sample: str
     sample_number: int | None
@@ -21,11 +25,12 @@ class PairKey:
     chunk: int | None
     read_style: str
     suffix: str
-    relative_parent: Path
+    relative_parent: PurePosixPath
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sample", self.sample.casefold())
         object.__setattr__(self, "suffix", self.suffix.casefold())
+        object.__setattr__(self, "relative_parent", PurePosixPath(self.relative_parent.as_posix()))
 
 
 class PairStatus(Enum):
@@ -72,7 +77,7 @@ def pair_key(record: InventoryRecord) -> PairKey | None:
         chunk=parsed.chunk,
         read_style=parsed.read_style,
         suffix=parsed.suffix,
-        relative_parent=record.relative_path.parent,
+        relative_parent=PurePosixPath(record.relative_path.parent.as_posix()),
     )
 
 

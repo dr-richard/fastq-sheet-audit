@@ -1,5 +1,5 @@
 from dataclasses import FrozenInstanceError, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -18,7 +18,7 @@ def record(name: str, category=InventoryCategory.READ) -> InventoryRecord:
 def test_exact_complete_pair_and_key():
     r1 = record("run/A_S1_L001_R1_001.fastq.gz")
     r2 = record("run/A_S1_L001_R2_001.fastq.gz")
-    expected = PairKey("A", 1, 1, 1, "R", ".fastq.gz", Path("run"))
+    expected = PairKey("A", 1, 1, 1, "R", ".fastq.gz", PurePosixPath("run"))
     assert pair_key(r1) == pair_key(r2) == expected
     group, = group_pairs([r2, r1])
     assert group.key == expected
@@ -93,7 +93,7 @@ def test_multiple_lanes_are_independent_pairs():
 def test_same_filenames_in_different_directories_remain_separate():
     groups = group_pairs(record(f"{parent}/A_{role}.fastq")
                          for parent in ("two", "one") for role in ("R1", "R2"))
-    assert [group.key.relative_parent for group in groups] == [Path("one"), Path("two")]
+    assert [group.key.relative_parent for group in groups] == [PurePosixPath("one"), PurePosixPath("two")]
     assert all(group.status is PairStatus.COMPLETE for group in groups)
 
 
@@ -165,3 +165,67 @@ def test_pair_key_and_group_are_immutable():
 
 def test_empty_inventory():
     assert group_pairs([]) == []
+
+
+@pytest.mark.parametrize("path_type", [PurePosixPath, PureWindowsPath, Path])
+def test_case_only_parent_identity_is_exact_across_path_flavors(path_type):
+    r1 = replace(record("Run/A_R1.fastq"), relative_path=path_type("Run/A_R1.fastq"))
+    r2 = replace(record("run/a_R2.FASTQ"), relative_path=path_type("run/a_R2.FASTQ"))
+    upper, lower = pair_key(r1), pair_key(r2)
+    assert upper != lower
+    assert type(upper.relative_parent) is type(lower.relative_parent) is PurePosixPath
+    assert upper.relative_parent.as_posix() == "Run"
+    assert lower.relative_parent.as_posix() == "run"
+    assert upper.sample == lower.sample == "a"
+    assert upper.suffix == lower.suffix == ".fastq"
+    assert len({upper, lower}) == 2
+    assert hash(upper) == hash(pair_key(r1))
+    assert hash(lower) == hash(pair_key(r2))
+    groups = group_pairs([r2, r1])
+    assert [group.status for group in groups] == [PairStatus.R1_ONLY, PairStatus.R2_ONLY]
+    assert [group.key for group in groups] == [upper, lower]
+    assert group_pairs([r1, r2]) == groups
+    same_parent_r2 = replace(r2, relative_path=path_type("Run/a_R2.FASTQ"))
+    complete, = group_pairs([same_parent_r2, r1])
+    assert complete.status is PairStatus.COMPLETE
+    assert complete.key == upper
+
+
+def test_direct_pair_key_construction_also_enforces_exact_parent_identity():
+    upper = PairKey("A", 2, 3, 4, "R", ".FASTQ", PureWindowsPath("Run/项目"))
+    lower = replace(upper, relative_parent=PureWindowsPath("run/项目"))
+    equivalent = replace(upper, relative_parent=PurePosixPath("Run/项目"))
+    assert upper != lower
+    assert upper == equivalent and hash(upper) == hash(equivalent)
+    assert type(upper.relative_parent) is PurePosixPath
+    assert upper.relative_parent.as_posix() == "Run/项目"
+    assert len({upper: "upper", lower: "lower", equivalent: "same upper"}) == 2
+
+
+def test_report_and_presentation_preserve_exact_parent_spelling_without_io(monkeypatch):
+    from fastq_sheet_audit.adjudication import PairDecision, RoleDecision, RoleDecisionKind, resolve_pair_group
+    from fastq_sheet_audit.presentation import present_workflow
+    from fastq_sheet_audit.read_mode import diagnose_read_mode
+    from fastq_sheet_audit.reconciliation import ReconciliationResult
+    from fastq_sheet_audit.reporting import build_workflow_report
+    from fastq_sheet_audit.workflow import WorkflowSnapshot
+
+    records = (record("Run/项目/A_R1.fastq"), record("run/项目/A_R2.fastq"))
+    def fail(*args, **kwargs):
+        pytest.fail("pairing or consumers accessed filesystem/network")
+    with monkeypatch.context() as patch:
+        for method in ("open", "stat", "lstat", "resolve", "read_bytes", "read_text"):
+            patch.setattr(Path, method, fail)
+        patch.setattr("socket.socket", fail)
+        groups = group_pairs(records)
+        automatic = RoleDecision(RoleDecisionKind.AUTOMATIC, None)
+        resolutions = tuple(resolve_pair_group(group, PairDecision(group.key, automatic, automatic, False))
+                            for group in groups)
+        snapshot = WorkflowSnapshot(records, ReconciliationResult(records, (), ()),
+                                    diagnose_read_mode(records), (), resolutions)
+        report = build_workflow_report(snapshot)
+        view = present_workflow(snapshot)
+    assert [r.group.key.relative_parent for r in report.pair_resolutions] == ["Run/项目", "run/项目"]
+    assert "relative_parent='Run/项目'" in view.pairs[0].key_text
+    assert "relative_parent='run/项目'" in view.pairs[1].key_text
+    assert [r.group.key.relative_parent for r in resolutions] == [PurePosixPath("Run/项目"), PurePosixPath("run/项目")]
