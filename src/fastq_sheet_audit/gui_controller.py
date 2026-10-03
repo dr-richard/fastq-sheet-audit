@@ -1,15 +1,17 @@
 """Thin read-only orchestration for an explicit GUI audit action."""
 
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping
 
-from .column_mapping import ColumnRole, map_columns
-from .inventory import scan_fastqs
+from .adjudication import PairDecision, RoleDecision, RoleDecisionKind
+from .column_mapping import ColumnMappingResult, ColumnRole, map_columns
+from .inventory import InventoryRecord, scan_fastqs
+from .pairing import PairKey
 from .presentation import WorkflowView, present_workflow
 from .read_mode import ReadMode
-from .sheet import load_sheet
-from .workflow import build_workflow_snapshot
+from .sheet import SampleSheet, load_sheet
+from .workflow import WorkflowSnapshot, build_workflow_snapshot
 
 
 def read_mode_from_label(label: str) -> ReadMode:
@@ -80,10 +82,41 @@ def mapping_overrides(
     return overrides
 
 
-def audit_inputs(
+@dataclass(frozen=True)
+class AuditSession:
+    sheet: SampleSheet
+    mapping: ColumnMappingResult
+    inventory: tuple[InventoryRecord, ...]
+    fastq_root: Path
+    read_mode: ReadMode
+    decisions: tuple[PairDecision, ...]
+    snapshot: WorkflowSnapshot
+    view: WorkflowView
+
+
+@dataclass(frozen=True)
+class PairCandidateChoice:
+    index: int
+    relative_path: str
+    display: str
+
+
+@dataclass(frozen=True)
+class PairAdjudicationView:
+    pair_index: int
+    key: PairKey
+    r1_choices: tuple[PairCandidateChoice, ...]
+    r2_choices: tuple[PairCandidateChoice, ...]
+    r1_selection: str
+    r2_selection: str
+    confirmed: bool
+    resolved: bool
+
+
+def audit_session(
     fastq_directory: str, sample_sheet: str, read_mode_label: str,
     overrides: Mapping[ColumnRole, int | None] | None = None,
-) -> WorkflowView:
+) -> AuditSession:
     """Audit explicit input paths; propagate errors to the GUI callback boundary."""
     if not fastq_directory.strip() or not sample_sheet.strip():
         raise ValueError("Choose a FASTQ directory and sample sheet.")
@@ -100,5 +133,79 @@ def audit_inputs(
         raise ValueError(f"Ambiguous column mapping: {roles}. Explicit mapping is required.")
     if not mapping.complete:
         raise ValueError("Column mapping requires SAMPLE and R1 columns.")
+    root = root.absolute()
     records = scan_fastqs(root)
-    return present_workflow(build_workflow_snapshot(sheet, mapping, records, root, read_mode=mode))
+    snapshot = build_workflow_snapshot(sheet, mapping, records, root, read_mode=mode)
+    return AuditSession(sheet, mapping, snapshot.inventory, root, mode, (), snapshot, present_workflow(snapshot))
+
+
+def audit_inputs(
+    fastq_directory: str, sample_sheet: str, read_mode_label: str,
+    overrides: Mapping[ColumnRole, int | None] | None = None,
+) -> WorkflowView:
+    """Compatibility wrapper returning the presentation of a new session."""
+    return audit_session(fastq_directory, sample_sheet, read_mode_label, overrides).view
+
+
+def _candidate_choices(candidates: tuple[InventoryRecord, ...]) -> tuple[PairCandidateChoice, ...]:
+    return tuple(PairCandidateChoice(index, record.relative_path.as_posix(),
+                                    f"[{index}] {record.relative_path.as_posix()}")
+                 for index, record in enumerate(candidates))
+
+
+def _selection_text(decision: RoleDecision, candidates: tuple[InventoryRecord, ...]) -> str:
+    if decision.kind is RoleDecisionKind.AUTOMATIC:
+        return "Automatic"
+    if decision.kind is RoleDecisionKind.UNASSIGN:
+        return "Unassigned"
+    return _candidate_choices(candidates)[candidates.index(decision.selected)].display
+
+
+def pair_adjudication_views(session: AuditSession) -> tuple[PairAdjudicationView, ...]:
+    """Expose existing candidate order and decisions, never selecting candidates."""
+    return tuple(PairAdjudicationView(
+        index, resolution.group.key, _candidate_choices(resolution.group.r1),
+        _candidate_choices(resolution.group.r2),
+        _selection_text(resolution.decision.r1, resolution.group.r1),
+        _selection_text(resolution.decision.r2, resolution.group.r2),
+        resolution.confirmed, resolution.resolved,
+    ) for index, resolution in enumerate(session.snapshot.pair_resolutions))
+
+
+def _role_selection(selection: str, candidates: tuple[InventoryRecord, ...]) -> RoleDecision:
+    if selection == "Automatic":
+        return RoleDecision(RoleDecisionKind.AUTOMATIC, None)
+    if selection == "Unassigned":
+        return RoleDecision(RoleDecisionKind.UNASSIGN, None)
+    for choice in _candidate_choices(candidates):
+        if selection == choice.display:
+            return RoleDecision(RoleDecisionKind.SELECT, candidates[choice.index])
+    raise ValueError(f"unknown candidate display: {selection!r}")
+
+
+def apply_pair_adjudication(
+    session: AuditSession, pair_index: int, r1_selection: str, r2_selection: str, confirmed: bool,
+) -> AuditSession:
+    """Return rebuilt state using existing workflow checks, without load/scan.
+
+    Only explicit human decisions are stored. Resetting both roles to Automatic
+    with confirmed=False removes the explicit entry. Raw evidence is retained.
+    """
+    if type(pair_index) is not int or not 0 <= pair_index < len(session.snapshot.pair_resolutions):
+        raise ValueError("invalid or stale pair index")
+    if type(confirmed) is not bool:
+        raise ValueError("confirmed must be a boolean")
+    group = session.snapshot.pair_resolutions[pair_index].group
+    decision = PairDecision(group.key, _role_selection(r1_selection, group.r1),
+                            _role_selection(r2_selection, group.r2), confirmed)
+    decisions = {item.key: item for item in session.decisions}
+    if (decision.r1.kind is RoleDecisionKind.AUTOMATIC
+            and decision.r2.kind is RoleDecisionKind.AUTOMATIC and not confirmed):
+        decisions.pop(group.key, None)
+    else:
+        decisions[group.key] = decision
+    snapshot = build_workflow_snapshot(session.sheet, session.mapping, session.inventory,
+                                       session.fastq_root, read_mode=session.read_mode, decisions=decisions)
+    ordered = tuple(decisions[resolution.group.key] for resolution in snapshot.pair_resolutions
+                    if resolution.group.key in decisions)
+    return replace(session, decisions=ordered, snapshot=snapshot, view=present_workflow(snapshot))

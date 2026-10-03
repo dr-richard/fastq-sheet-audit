@@ -169,3 +169,163 @@ def test_unknown_display_choice_rejected(tmp_path):
     view = controller.inspect_sheet_mapping(str(path))
     with pytest.raises(ValueError, match="unknown column choice"):
         controller.mapping_overrides(view, {ColumnRole.SAMPLE: "sample"})
+
+
+def session_fixture(tmp_path, mode="Auto", ambiguous=False):
+    root, path = inputs(tmp_path)
+    if ambiguous:
+        from dataclasses import replace
+        original_scan = controller.scan_fastqs
+        records = original_scan(root)
+        alias = root.parent / "alias.fastq"
+        alias.symlink_to(records[0].path)
+        records.append(replace(records[0], path=alias))
+        sheet = load_sheet(path)
+        mapping = map_columns(sheet)
+        snapshot = build_workflow_snapshot(sheet, mapping, records, root,
+                                           read_mode=controller.read_mode_from_label(mode))
+        return controller.AuditSession(sheet, mapping, snapshot.inventory, root,
+                                       controller.read_mode_from_label(mode), (), snapshot, present_workflow(snapshot))
+    return controller.audit_session(str(root), str(path), mode)
+
+
+def test_session_matches_compatibility_wrapper_and_has_no_explicit_decisions(tmp_path):
+    root, path = inputs(tmp_path)
+    session = controller.audit_session(str(root), str(path), "Auto")
+    assert session.view == controller.audit_inputs(str(root), str(path), "Auto")
+    assert session.decisions == ()
+    assert session.inventory is session.snapshot.inventory
+    assert session.fastq_root.is_absolute()
+
+
+def test_ambiguous_candidates_automatic_and_select(tmp_path):
+    session = session_fixture(tmp_path, ambiguous=True)
+    view, = controller.pair_adjudication_views(session)
+    assert view.pair_index == 0
+    assert len(view.r1_choices) == 2
+    assert [choice.index for choice in view.r1_choices] == [0, 1]
+    assert view.r1_choices[1].display == "[1] A_R1.fastq"
+    assert view.r1_selection == view.r2_selection == "Automatic"
+    assert not view.resolved
+    automatic = controller.apply_pair_adjudication(session, 0, "Automatic", "Automatic", True)
+    assert automatic.snapshot.has_unresolved_pairs
+    assert not automatic.view.summary.ready_for_export
+    selected = controller.apply_pair_adjudication(session, 0, view.r1_choices[1].display, "Automatic", False)
+    assert selected.snapshot.pair_resolutions[0].resolved
+    assert selected.view.summary.ready_for_export
+    assert len(selected.snapshot.pair_resolutions[0].group.r1) == 2
+    assert selected.inventory is session.inventory
+    updated, = controller.pair_adjudication_views(selected)
+    assert updated.r1_selection == view.r1_choices[1].display
+    assert not updated.confirmed
+
+
+@pytest.mark.parametrize("mode", ["Auto", "Paired"])
+def test_r2_unassigned_revalidates_layout(tmp_path, mode):
+    session = session_fixture(tmp_path, mode)
+    updated = controller.apply_pair_adjudication(session, 0, "Automatic", "Unassigned", True)
+    resolution = updated.snapshot.pair_resolutions[0]
+    assert resolution.effective_r2 is None
+    assert resolution.unresolved_r2 == ()
+    assert len(resolution.group.r2) == 1
+    assert controller.pair_adjudication_views(updated)[0].r2_selection == "Unassigned"
+    assert updated.decisions[0].confirmed
+    if mode == "Auto":
+        assert updated.snapshot.read_mode.layout.value == "single"
+        assert updated.view.summary.ready_for_export
+    else:
+        assert updated.snapshot.read_mode.diagnostics[0].code == "MISSING_R2"
+        assert not updated.view.summary.ready_for_export
+
+
+def test_confirmed_r1_unassigned_is_not_resolved(tmp_path):
+    session = session_fixture(tmp_path, ambiguous=True)
+    updated = controller.apply_pair_adjudication(session, 0, "Unassigned", "Automatic", True)
+    resolution = updated.snapshot.pair_resolutions[0]
+    assert resolution.confirmed
+    assert resolution.unresolved_r1 == ()
+    assert len(resolution.group.r1) == 2
+    assert not resolution.resolved
+    assert not updated.view.summary.ready_for_export
+
+
+def test_independent_decisions_replacement_and_reset(tmp_path):
+    root, path = inputs(tmp_path)
+    (root / "B_R1.fastq").touch()
+    path.write_text("sample,r1,r2\nA,A_R1.fastq,A_R2.fastq\nB,B_R1.fastq,\n")
+    original = controller.audit_session(str(root), str(path), "Auto")
+    views = controller.pair_adjudication_views(original)
+    assert [view.pair_index for view in views] == [0, 1]
+    assert [view.key.sample for view in views] == ["a", "b"]
+    first = controller.apply_pair_adjudication(original, 0, "Automatic", "Unassigned", True)
+    second = controller.apply_pair_adjudication(first, 1, views[1].r1_choices[0].display, "Automatic", True)
+    assert len(second.decisions) == 2
+    replaced = controller.apply_pair_adjudication(second, 0, "Automatic", "Automatic", True)
+    assert len(replaced.decisions) == 2
+    assert replaced.decisions[1] is second.decisions[1]
+    reset = controller.apply_pair_adjudication(replaced, 0, "Automatic", "Automatic", False)
+    assert reset.decisions == (second.decisions[1],)
+    assert controller.pair_adjudication_views(reset)[0].r2_selection == "Automatic"
+    assert original.decisions == ()
+    assert controller.pair_adjudication_views(original) == views
+
+
+@pytest.mark.parametrize("index", [-1, 1, 100, True, False, 0.0, "0", None])
+def test_invalid_pair_index_rejected(tmp_path, index):
+    session = session_fixture(tmp_path)
+    with pytest.raises(ValueError, match="pair index"):
+        controller.apply_pair_adjudication(session, index, "Automatic", "Automatic", False)
+
+
+@pytest.mark.parametrize("confirmed", [0, 1, None, "true"])
+def test_confirmation_requires_bool(tmp_path, confirmed):
+    session = session_fixture(tmp_path)
+    with pytest.raises(ValueError, match="boolean"):
+        controller.apply_pair_adjudication(session, 0, "Automatic", "Automatic", confirmed)
+
+
+@pytest.mark.parametrize("r1, r2", [("[0] missing.fastq", "Automatic"), ("Automatic", "[0] A_R1.fastq"),
+                                  ("A_R1.fastq", "Automatic")])
+def test_unknown_or_wrong_role_display_rejected(tmp_path, r1, r2):
+    session = session_fixture(tmp_path)
+    with pytest.raises(ValueError, match="unknown candidate display"):
+        controller.apply_pair_adjudication(session, 0, r1, r2, False)
+
+
+def test_session_immutability_and_no_reloading_scanning_reads_writes_or_network(tmp_path, monkeypatch):
+    from dataclasses import FrozenInstanceError
+    session = session_fixture(tmp_path)
+    views = controller.pair_adjudication_views(session)
+    def fail(*args, **kwargs):
+        pytest.fail("adjudication reloaded/scanned/read/wrote/accessed network")
+    monkeypatch.setattr(controller, "load_sheet", fail)
+    monkeypatch.setattr(controller, "scan_fastqs", fail)
+    for method in ("open", "read_bytes", "read_text", "write_bytes", "write_text", "rename", "unlink"):
+        monkeypatch.setattr(Path, method, fail)
+    monkeypatch.setattr("builtins.open", fail)
+    monkeypatch.setattr("socket.socket", fail)
+    updated = controller.apply_pair_adjudication(session, 0, views[0].r1_choices[0].display, "Automatic", True)
+    assert updated is not session
+    assert updated.sheet is session.sheet
+    assert updated.mapping is session.mapping
+    assert updated.inventory is session.inventory
+    assert session.decisions == ()
+    assert controller.pair_adjudication_views(session) == views
+    assert controller.apply_pair_adjudication(session, 0, views[0].r1_choices[0].display, "Automatic", True) == updated
+    for obj, field, value in [(session, "decisions", ()), (views[0], "confirmed", True),
+                              (views[0].r1_choices[0], "index", 8)]:
+        with pytest.raises(FrozenInstanceError):
+            setattr(obj, field, value)
+
+
+def test_adjudication_keeps_raw_collisions_and_reconciliation_findings(tmp_path):
+    root, path = inputs(tmp_path)
+    (root / "a_R1.fastq").touch()
+    session = controller.audit_session(str(root), str(path), "Auto")
+    choice = controller.pair_adjudication_views(session)[0].r1_choices[0].display
+    updated = controller.apply_pair_adjudication(session, 0, choice, "Automatic", True)
+    assert updated.snapshot.reconciliation == session.snapshot.reconciliation
+    assert updated.snapshot.case_collisions == session.snapshot.case_collisions
+    assert updated.snapshot.case_collisions
+    assert updated.snapshot.reconciliation.findings
+    assert not updated.view.summary.ready_for_export
