@@ -95,6 +95,164 @@ class ApplicationWindow:
     output_preview: Any = None
     validation_preview: Any = None
     export_state: dict = field(default_factory=dict)
+    manual_table: Any = None
+    manual_column: Any = None
+    manual_column_box: Any = None
+    manual_value: Any = None
+    manual_value_entry: Any = None
+    manual_value_status: Any = None
+    manual_set_button: Any = None
+    manual_clear_button: Any = None
+
+
+def disable_manual_editor(application: ApplicationWindow) -> None:
+    application.manual_column.set("")
+    application.manual_value.set("")
+    application.manual_value_status.set("Unset")
+    for control in (application.manual_column_box, application.manual_value_entry,
+                    application.manual_set_button, application.manual_clear_button):
+        control.configure(state="disabled")
+
+
+def clear_manual_editor(application: ApplicationWindow) -> None:
+    for key in ("manual_view", "manual_values", "manual_row_index"):
+        application.export_state.pop(key, None)
+    disable_manual_editor(application)
+    children = application.manual_table.get_children()
+    if children:
+        application.manual_table.delete(*children)
+    application.manual_table.configure(columns=())
+    application.manual_column_box.configure(values=())
+
+
+def render_manual_table(application: ApplicationWindow) -> None:
+    view = application.export_state["manual_view"]
+    children = application.manual_table.get_children()
+    if children:
+        application.manual_table.delete(*children)
+    labels = ("row", "sample") + tuple(column.name for column in view.columns)
+    application.manual_table.configure(columns=labels)
+    for label in labels:
+        application.manual_table.heading(label, text=label)
+        application.manual_table.column(label, width=160, minwidth=50)
+    values = application.export_state["manual_values"]
+    for index, row in enumerate(view.rows):
+        application.manual_table.insert("", "end", iid=f"manual:{index}", values=(
+            row.row_number, row.sample,
+            *(values.get(row.row_number, {}).get(column.name, "") for column in view.columns)))
+    index = application.export_state.get("manual_row_index")
+    if type(index) is int and 0 <= index < len(view.rows):
+        application.manual_table.selection_set(f"manual:{index}")
+
+
+def manual_row_selection_action(application: ApplicationWindow) -> None:
+    selected = application.manual_table.selection()
+    previous = application.export_state.get("manual_row_index")
+    if type(previous) is int and selected == (f"manual:{previous}",):
+        view = application.export_state.get("manual_view")
+        if view is not None and 0 <= previous < len(view.rows) and application.session_state.get("session") is not None:
+            return
+    application.export_state.pop("manual_row_index", None)
+    disable_manual_editor(application)
+    view = application.export_state.get("manual_view")
+    if application.session_state.get("session") is None or view is None or len(selected) != 1:
+        return
+    identity = selected[0]
+    try:
+        index = int(identity.removeprefix("manual:"))
+    except (ValueError, AttributeError):
+        return
+    if identity != f"manual:{index}" or not 0 <= index < len(view.rows):
+        return
+    application.export_state["manual_row_index"] = index
+    if view.columns:
+        application.manual_column_box.configure(state="readonly")
+
+
+def _manual_cell(application: ApplicationWindow) -> tuple[int, str]:
+    view = application.export_state.get("manual_view")
+    index = application.export_state.get("manual_row_index")
+    column = application.manual_column.get()
+    if (application.session_state.get("session") is None or view is None
+            or type(index) is not int or not 0 <= index < len(view.rows)
+            or column not in tuple(item.name for item in view.columns)):
+        raise ValueError("Select a manual metadata row and column.")
+    return view.rows[index].row_number, column
+
+
+def manual_column_selection_action(application: ApplicationWindow) -> None:
+    try:
+        row_number, column = _manual_cell(application)
+    except ValueError:
+        disable_manual_editor(application)
+        return
+    values = application.export_state["manual_values"].get(row_number, {})
+    value = values.get(column, "")
+    application.manual_value.set(value)
+    application.manual_value_status.set("Unset" if column not in values else
+                                        "Set (empty)" if value == "" else "Set")
+    for control in (application.manual_value_entry, application.manual_set_button, application.manual_clear_button):
+        control.configure(state="normal")
+
+
+def _edit_manual_value(application: ApplicationWindow, *, clear: bool) -> None:
+    try:
+        row_number, column = _manual_cell(application)
+    except ValueError as error:
+        application.status.set(str(error))
+        return
+    values = application.export_state["manual_values"]
+    if clear:
+        row = values.get(row_number)
+        if row is not None:
+            row.pop(column, None)
+            if not row:
+                values.pop(row_number)
+    else:
+        values.setdefault(row_number, {})[column] = application.manual_value.get()
+    manual_column_selection_action(application)
+    render_manual_table(application)
+    invalidate_export_preview(application)
+
+
+def set_manual_value_action(application: ApplicationWindow) -> None:
+    _edit_manual_value(application, clear=False)
+
+
+def clear_manual_value_action(application: ApplicationWindow) -> None:
+    _edit_manual_value(application, clear=True)
+
+
+def manual_edit_is_dirty(application: ApplicationWindow) -> bool:
+    try:
+        row_number, column = _manual_cell(application)
+    except ValueError:
+        return False
+    stored = application.export_state["manual_values"].get(row_number, {}).get(column, "")
+    return application.manual_value.get() != stored
+
+
+def manual_values_snapshot(application: ApplicationWindow) -> dict[int, dict[str, str]] | None:
+    view = application.export_state.get("manual_view")
+    values = application.export_state.get("manual_values", {})
+    result = {}
+    if view is not None:
+        for row in view.rows:
+            stored = values.get(row.row_number, {})
+            explicit = {column.name: stored[column.name] for column in view.columns if column.name in stored}
+            if explicit:
+                result[row.row_number] = explicit
+    return result or None
+
+
+def manual_metadata_signature(application: ApplicationWindow) -> tuple:
+    view = application.export_state.get("manual_view")
+    values = application.export_state.get("manual_values", {})
+    if view is None:
+        return ()
+    return tuple((row.row_number, tuple(
+        (column.name, column.name in values.get(row.row_number, {}),
+         values.get(row.row_number, {}).get(column.name)) for column in view.columns)) for row in view.rows)
 
 
 def invalidate_export_preview(application: ApplicationWindow) -> None:
@@ -109,15 +267,26 @@ def invalidate_export_preview(application: ApplicationWindow) -> None:
 
 
 def profile_selection_action(application: ApplicationWindow) -> None:
-    from .gui_controller import manual_profile_columns
+    from .gui_controller import manual_profile_columns, manual_metadata_view
 
     invalidate_export_preview(application)
+    clear_manual_editor(application)
     profile = next((item for item in application.export_state.get("profiles", ())
                     if item.profile_id == application.profile.get()), None)
     application.profile_notes.set(profile.notes if profile else "")
     application.manual_fields.set("Manual fields: " + (
         ", ".join(column.name for column in manual_profile_columns(profile)) or "none"
     ) if profile else "")
+    session = application.session_state.get("session")
+    if profile is not None and session is not None:
+        try:
+            view = manual_metadata_view(session, profile.profile_id)
+        except (OSError, ValueError) as error:
+            application.status.set(f"Manual metadata failed: {error}")
+            return
+        application.export_state.update(manual_view=view, manual_values={})
+        application.manual_column_box.configure(values=tuple(column.name for column in view.columns))
+        render_manual_table(application)
 
 
 def path_mode_action(application: ApplicationWindow) -> None:
@@ -167,13 +336,17 @@ def preview_export_action(application: ApplicationWindow) -> None:
         profile_id = application.profile.get()
         if not profile_id:
             raise ValueError("Choose an export profile.")
+        if manual_edit_is_dirty(application):
+            raise ValueError("Apply or clear the current manual metadata edit before preview.")
+        explicit_values = manual_values_snapshot(application)
         options = (application.path_mode.get(), application.target_root.get(), application.target_style.get())
         plan = plan_session_export(session, profile_id, options[0], target_root=options[1],
-                                   target_style_label=options[2], explicit_values=None)
+                                   target_style_label=options[2], explicit_values=explicit_values)
     except (OSError, ValueError) as error:
         application.status.set(f"Export preview failed: {error}")
         return
-    application.export_state.update(plan=plan, signature=(session, profile_id, *options))
+    application.export_state.update(plan=plan, signature=(session, profile_id, *options,
+                                                         manual_metadata_signature(application)))
     sheet = plan.plan.result.sheet
     application.output_preview.configure(columns=sheet.headers)
     for header in sheet.headers:
@@ -247,6 +420,7 @@ def invalidate_audit_session(application: ApplicationWindow) -> None:
     disable_pair_editor(application)
     application.export_button.configure(state="disabled")
     invalidate_export_preview(application)
+    clear_manual_editor(application)
     application.export_state.clear()
     for variable in (application.profile, application.path_mode, application.target_root,
                      application.target_style, application.profile_notes, application.manual_fields):
@@ -548,10 +722,30 @@ def build_application(root: Any) -> ApplicationWindow:
     ttk.Label(export_tab, textvariable=manual_fields).grid(row=7, column=0, columnspan=2, sticky="w")
     preview_button = ttk.Button(export_tab, text="Preview export", state="disabled")
     preview_button.grid(row=5, column=0, sticky="w")
+    manual_frame = ttk.LabelFrame(export_tab, text="Manual metadata", padding=4)
+    manual_frame.grid(row=8, column=0, columnspan=2, sticky="nsew")
+    manual_frame.columnconfigure(0, weight=1)
+    export_tab.rowconfigure(8, weight=1)
+    manual_table = table(manual_frame, ())
+    editor = ttk.Frame(manual_frame)
+    editor.grid(row=2, column=0, columnspan=2, sticky="ew")
+    editor.columnconfigure(1, weight=1)
+    manual_column = tk.StringVar(root, value="")
+    manual_value = tk.StringVar(root, value="")
+    manual_value_status = tk.StringVar(root, value="Unset")
+    manual_column_box = ttk.Combobox(editor, textvariable=manual_column, state="disabled")
+    manual_column_box.grid(row=0, column=0, padx=(0, 8))
+    manual_value_entry = ttk.Entry(editor, textvariable=manual_value, state="disabled")
+    manual_value_entry.grid(row=0, column=1, sticky="ew")
+    ttk.Label(editor, textvariable=manual_value_status).grid(row=0, column=2, padx=8)
+    manual_set_button = ttk.Button(editor, text="Set", state="disabled")
+    manual_set_button.grid(row=0, column=3)
+    manual_clear_button = ttk.Button(editor, text="Clear", state="disabled")
+    manual_clear_button.grid(row=0, column=4)
     preview_tables = []
     for row, label, columns in (
-        (8, "Candidate output", ()),
-        (9, "Profile validation", tuple(TableColumn(key, key.title()) for key in
+        (9, "Candidate output", ()),
+        (10, "Profile validation", tuple(TableColumn(key, key.title()) for key in
                                         ("code", "row", "column", "value", "message"))),
     ):
         container = ttk.LabelFrame(export_tab, text=label, padding=4)
@@ -573,7 +767,11 @@ def build_application(root: Any) -> ApplicationWindow:
                              target_style=export_variables[2], target_style_box=export_widgets[2],
                              target_root=export_variables[3], target_root_entry=export_widgets[3],
                              profile_notes=profile_notes, manual_fields=manual_fields, preview_button=preview_button,
-                             output_preview=preview_tables[0], validation_preview=preview_tables[1])
+                             output_preview=preview_tables[0], validation_preview=preview_tables[1],
+                             manual_table=manual_table, manual_column=manual_column, manual_column_box=manual_column_box,
+                             manual_value=manual_value, manual_value_entry=manual_value_entry,
+                             manual_value_status=manual_value_status, manual_set_button=manual_set_button,
+                             manual_clear_button=manual_clear_button)
     audit_button.configure(command=lambda: audit_action(application))
     load_columns_button.configure(command=lambda: load_columns_action(application))
     pairing_table.bind("<<TreeviewSelect>>", lambda event: pair_selection_action(application))
@@ -584,6 +782,10 @@ def build_application(root: Any) -> ApplicationWindow:
     for box in mapping_boxes:
         box.bind("<<ComboboxSelected>>", lambda event: invalidate_audit_session(application))
     preview_button.configure(command=lambda: preview_export_action(application))
+    manual_table.bind("<<TreeviewSelect>>", lambda event: manual_row_selection_action(application))
+    manual_column_box.bind("<<ComboboxSelected>>", lambda event: manual_column_selection_action(application))
+    manual_set_button.configure(command=lambda: set_manual_value_action(application))
+    manual_clear_button.configure(command=lambda: clear_manual_value_action(application))
     return application
 
 

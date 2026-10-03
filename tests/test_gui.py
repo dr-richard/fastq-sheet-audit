@@ -166,15 +166,197 @@ def fake_application():
         target_root_entry=Mock(), profile_notes=FakeVariable(""), manual_fields=FakeVariable(""),
         preview_button=Mock(), output_preview=FakeTable(events), validation_preview=FakeTable(events),
         export_state={},
+        manual_table=FakeTable(events), manual_column=FakeVariable(""), manual_column_box=Mock(),
+        manual_value=FakeVariable(""), manual_value_entry=Mock(), manual_value_status=FakeVariable("Unset"),
+        manual_set_button=Mock(), manual_clear_button=Mock(),
     )
 
 
 def export_application(*, ready=True):
+    from fastq_sheet_audit.sheet import SampleSheet, SheetRow
+    from fastq_sheet_audit.column_mapping import map_columns
     application = fake_application()
-    session = SimpleNamespace(snapshot=SimpleNamespace(ready_for_export=ready))
+    sheet = SampleSheet(("sample", "r1"), (SheetRow(9, (" α ", "a")), SheetRow(3, ("=sample", "b"))))
+    session = SimpleNamespace(snapshot=SimpleNamespace(ready_for_export=ready), sheet=sheet, mapping=map_columns(sheet))
     application.session_state.update(session=session, signature=gui.audit_input_signature(application))
     gui.refresh_export_controls(application)
     return application
+
+
+def manual_application(profile_id="nfcore-rnaseq-3.27.0"):
+    application = export_application()
+    application.profile.set(profile_id)
+    gui.profile_selection_action(application)
+    return application
+
+
+def select_manual_cell(application, index=0, column="strandedness"):
+    application.manual_table.selection_set(f"manual:{index}")
+    gui.manual_row_selection_action(application)
+    application.manual_column.set(column)
+    gui.manual_column_selection_action(application)
+
+
+@pytest.mark.parametrize("profile_id,names", [
+    ("generic", ()), ("nfcore-rnaseq-3.27.0", ("strandedness",)),
+    ("nfcore-methylseq-4.2.0", ("genome",)), ("nfcore-smrnaseq-2.4.1", ()),
+    ("nfcore-viralrecon-3.0.0-illumina", ()), ("nfcore-viralrecon-3.0.0-nanopore", ("barcode",)),
+])
+def test_manual_profile_table_exact_source_rows_and_columns(profile_id, names):
+    application = manual_application(profile_id)
+    view = application.export_state["manual_view"]
+    assert tuple(column.name for column in view.columns) == names
+    assert application.manual_table.options["columns"] == ("row", "sample", *names)
+    assert application.manual_table.rows == [(9, " α ", *("" for _ in names)), (3, "=sample", *("" for _ in names))]
+    assert application.manual_table.identities == ["manual:0", "manual:1"]
+    application.manual_column_box.configure.assert_any_call(values=names)
+    application.manual_value_entry.configure.assert_called_with(state="disabled")
+    application.manual_table.selection_set("manual:0")
+    gui.manual_row_selection_action(application)
+    application.manual_column_box.configure.assert_called_with(state="readonly" if names else "disabled")
+    assert application.manual_column.get() == ""
+
+
+@pytest.mark.parametrize("identity", ["", "manual:01", "manual:-1", "manual:99", "pair:0", "manual:x"])
+def test_invalid_manual_row_selection_disables_editor(identity):
+    application = manual_application()
+    application.manual_table.selected = (identity,) if identity else ()
+    gui.manual_row_selection_action(application)
+    assert "manual_row_index" not in application.export_state
+    application.manual_value_entry.configure.assert_called_with(state="disabled")
+
+
+@pytest.mark.parametrize("value", ["  α Unicode  ", "=SUM(A1)", "+01", "01", ""])
+def test_set_exact_manual_text_and_clear_absence(value):
+    application = manual_application()
+    select_manual_cell(application)
+    assert application.manual_value_status.get() == "Unset"
+    application.manual_value.set(value)
+    application.export_state["plan"] = object()
+    gui.set_manual_value_action(application)
+    assert application.export_state["manual_values"] == {9: {"strandedness": value}}
+    assert application.manual_value_status.get() == ("Set (empty)" if value == "" else "Set")
+    assert application.manual_table.rows[0] == (9, " α ", value)
+    assert "plan" not in application.export_state
+    gui.manual_row_selection_action(application)  # deferred Treeview event after rendering
+    assert application.manual_value.get() == value
+    application.export_state["plan"] = object()
+    gui.clear_manual_value_action(application)
+    assert application.export_state["manual_values"] == {}
+    assert application.manual_value_status.get() == "Unset"
+    assert "plan" not in application.export_state
+
+
+def test_independent_manual_rows_columns_snapshot_and_signature(monkeypatch):
+    from fastq_sheet_audit import gui_controller
+    from dataclasses import replace
+    application = manual_application()
+    view = application.export_state["manual_view"]
+    application.export_state["manual_view"] = replace(view, columns=(view.columns[0], replace(view.columns[0], name="second")))
+    for index, column, value in [(1, "second", "02"), (0, "strandedness", ""), (1, "strandedness", "reverse")]:
+        select_manual_cell(application, index, column)
+        application.manual_value.set(value)
+        gui.set_manual_value_action(application)
+    copied = gui.manual_values_snapshot(application)
+    assert list(copied) == [9, 3]
+    assert list(copied[3]) == ["strandedness", "second"]
+    assert copied == {9: {"strandedness": ""}, 3: {"strandedness": "reverse", "second": "02"}}
+    assert copied is not application.export_state["manual_values"]
+    assert copied[3] is not application.export_state["manual_values"][3]
+    application.export_state["manual_values"][999] = {"unknown": "ignored"}
+    assert gui.manual_values_snapshot(application) == copied
+    planner = Mock(return_value=preview_plan())
+    monkeypatch.setattr(gui_controller, "plan_session_export", planner)
+    gui.preview_export_action(application)
+    assert planner.call_args.kwargs["explicit_values"] == copied
+    assert planner.call_args.kwargs["explicit_values"] is not copied
+    signature = application.export_state["signature"][-1]
+    assert signature[0] == (9, (("strandedness", True, ""), ("second", False, None)))
+    gui.clear_manual_value_action(application)
+    assert gui.manual_metadata_signature(application) != signature
+
+
+def test_dirty_manual_edit_refuses_preview(monkeypatch):
+    from fastq_sheet_audit import gui_controller
+    application = manual_application()
+    select_manual_cell(application)
+    application.manual_value.set(" reverse ")
+    planner = Mock()
+    monkeypatch.setattr(gui_controller, "plan_session_export", planner)
+    gui.preview_export_action(application)
+    planner.assert_not_called()
+    assert application.status.get() == "Export preview failed: Apply or clear the current manual metadata edit before preview."
+    gui.clear_manual_value_action(application)
+    assert not gui.manual_edit_is_dirty(application)
+
+
+def test_profile_switch_discards_values_path_change_preserves_them():
+    application = manual_application()
+    select_manual_cell(application)
+    gui.set_manual_value_action(application)
+    explicit_empty = gui.manual_metadata_signature(application)
+    application.path_mode.set("Rebased root")
+    gui.path_mode_action(application)
+    assert application.export_state["manual_values"] == {9: {"strandedness": ""}}
+    application.profile.set("nfcore-methylseq-4.2.0")
+    gui.profile_selection_action(application)
+    assert application.export_state["manual_values"] == {}
+    assert gui.manual_metadata_signature(application) != explicit_empty
+    assert tuple(column.name for column in application.export_state["manual_view"].columns) == ("genome",)
+    gui.invalidate_audit_session(application)
+    assert "manual_view" not in application.export_state and "manual_values" not in application.export_state
+    assert application.manual_table.rows == []
+
+
+@pytest.mark.parametrize("error", [ValueError("stale sheet"), OSError("resource"), RuntimeError("bug")])
+def test_manual_metadata_exception_boundary(monkeypatch, error):
+    from fastq_sheet_audit import gui_controller
+    application = manual_application()
+    monkeypatch.setattr(gui_controller, "manual_metadata_view", Mock(side_effect=error))
+    if isinstance(error, RuntimeError):
+        with pytest.raises(RuntimeError):
+            gui.profile_selection_action(application)
+    else:
+        gui.profile_selection_action(application)
+        assert application.status.get() == f"Manual metadata failed: {error}"
+    assert "manual_view" not in application.export_state
+
+
+@pytest.mark.parametrize("value,valid", [(None, False), ("reverse", True), ("Reverse", False), ("", False)])
+def test_real_planner_controls_manual_validation(tmp_path, monkeypatch, value, valid):
+    from fastq_sheet_audit import gui_controller
+    root = tmp_path / "reads"
+    root.mkdir()
+    (root / "A_R1.fastq").write_bytes(b"not inspected")
+    source = tmp_path / "source.csv"
+    source.write_text("sample,r1\nA,A_R1.fastq\n")
+    session = gui_controller.audit_session(str(root), str(source), "Auto")
+    application = fake_application()
+    application.session_state.update(session=session, signature=gui.audit_input_signature(application))
+    gui.refresh_export_controls(application)
+    application.profile.set("nfcore-rnaseq-3.27.0")
+    gui.profile_selection_action(application)
+    if value is not None:
+        select_manual_cell(application)
+        application.manual_value.set(value)
+        gui.set_manual_value_action(application)
+    def forbidden(*args, **kwargs):
+        pytest.fail("preview wrote files, read audit inputs, or used network")
+    monkeypatch.setattr(gui_controller, "load_sheet", forbidden)
+    monkeypatch.setattr(gui_controller, "scan_fastqs", forbidden)
+    monkeypatch.setattr("socket.socket", forbidden)
+    from pathlib import Path
+    monkeypatch.setattr(Path, "write_text", forbidden)
+    monkeypatch.setattr(Path, "write_bytes", forbidden)
+    gui.preview_export_action(application)
+    assert application.export_state["plan"].plan.result.validation.ok is valid
+    application.export_button.configure.assert_called_with(state="disabled")
+    application.profile.set("nfcore-viralrecon-3.0.0-nanopore")
+    gui.profile_selection_action(application)
+    assert application.export_state["manual_view"].columns[0].name == "barcode"
+    gui.preview_export_action(application)
+    assert application.status.get().startswith("Export preview failed:")
+    assert "plan" not in application.export_state
 
 
 @pytest.mark.parametrize("ready", [True, False])
@@ -255,7 +437,7 @@ def test_preview_exact_options_rendering_status_and_dynamic_columns(monkeypatch,
     planner.assert_called_once_with(session, "generic", "Rebased root", target_root="D:\\ α ",
                                    target_style_label="Windows", explicit_values=None)
     assert application.export_state["plan"] is plan
-    assert application.export_state["signature"] == (session, "generic", "Rebased root", "D:\\ α ", "Windows")
+    assert application.export_state["signature"] == (session, "generic", "Rebased root", "D:\\ α ", "Windows", ())
     assert application.output_preview.options["columns"] == ("sample", "r1")
     assert application.output_preview.rows == [(" α =value ", "01"), ("+2", "@path")]
     assert application.validation_preview.rows == ([
@@ -320,11 +502,14 @@ def test_pair_action_invalidates_preview_and_refreshes_readiness(monkeypatch, re
     attach_session(application, editor_session(), monkeypatch)
     gui.load_pair_editor(application, 0)
     application.export_state["plan"] = object()
+    application.export_state.update(manual_values={9: {"strandedness": "reverse"}}, manual_view=object())
     new = editor_session()
     new.snapshot.ready_for_export = ready
     monkeypatch.setattr(gui_controller, "apply_pair_adjudication", Mock(return_value=new))
     (gui.reset_pair_action if reset else gui.apply_pair_action)(application)
     assert "plan" not in application.export_state
+    assert "manual_values" not in application.export_state
+    assert "manual_view" not in application.export_state
     assert application.output_preview.rows == application.validation_preview.rows == []
     application.preview_button.configure.assert_called_with(state="normal" if ready else "disabled")
     application.export_button.configure.assert_called_with(state="disabled")
@@ -611,6 +796,7 @@ def test_browse_invalidation_only_after_selection(monkeypatch, sample):
     gui.load_pair_editor(application, 0)
     plan = object()
     application.export_state["plan"] = plan
+    application.export_state["manual_values"] = {9: {"genome": " exact "}}
     chooser = Mock(return_value="")
     dialogs = SimpleNamespace(askdirectory=chooser, askopenfilename=chooser)
     monkeypatch.setitem(sys.modules, "tkinter", SimpleNamespace(filedialog=dialogs))
@@ -620,10 +806,12 @@ def test_browse_invalidation_only_after_selection(monkeypatch, sample):
     browse(variable, on_selected=callback)
     assert application.session_state["session"] is session
     assert application.export_state["plan"] is plan
+    assert application.export_state["manual_values"] == {9: {"genome": " exact "}}
     chooser.return_value = "new path"
     browse(variable, on_selected=callback)
     assert application.session_state == {}
     assert "plan" not in application.export_state
+    assert "manual_values" not in application.export_state
     application.apply_button.configure.assert_called_with(state="disabled")
 
 
@@ -634,16 +822,20 @@ def test_failed_audit_discards_session_and_success_starts_new_session(monkeypatc
     attach_session(application, old, monkeypatch)
     gui.load_pair_editor(application, 0)
     application.export_state["plan"] = object()
+    application.export_state["manual_values"] = {9: {"genome": "exact"}}
     monkeypatch.setattr(gui_controller, "audit_session", Mock(side_effect=ValueError("bad input")))
     gui.audit_action(application)
     assert application.session_state == {}
     assert "plan" not in application.export_state
+    assert "manual_values" not in application.export_state
     application.apply_button.configure.assert_called_with(state="disabled")
     new = editor_session()
     monkeypatch.setattr(gui_controller, "audit_session", Mock(return_value=new))
     application.export_state["plan"] = object()
+    application.export_state["manual_values"] = {9: {"genome": "exact"}}
     gui.audit_action(application)
     assert "plan" not in application.export_state
+    assert "manual_values" not in application.export_state
     assert application.session_state["session"] is new
     assert application.session_state["signature"] == gui.audit_input_signature(application)
     assert "pair_index" not in application.session_state
