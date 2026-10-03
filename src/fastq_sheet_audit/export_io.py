@@ -1,4 +1,4 @@
-"""Protected, atomic output of already-built sample sheets."""
+"""Protected atomic UTF-8 text publication and a sample-sheet adapter."""
 
 from __future__ import annotations
 
@@ -28,7 +28,22 @@ def write_sheet_atomic(
     protected_paths: Iterable[Path] = (),
     overwrite: bool = False,
 ) -> Path:
-    """Preflight, serialize, fsync, then replace using a same-directory temp.
+    """Serialize first, then publish through write_text_atomic and its safety checks.
+
+    See write_text_atomic for the portable no-overwrite race limitation.
+    """
+    text = serialize_sheet(sheet, format)
+    return write_text_atomic(text, destination, protected_paths=protected_paths, overwrite=overwrite)
+
+
+def write_text_atomic(
+    text: str,
+    destination: Path,
+    *,
+    protected_paths: Iterable[Path] = (),
+    overwrite: bool = False,
+) -> Path:
+    """Preflight, validate UTF-8, fsync, then replace using a same-directory temp.
 
     No-overwrite mode reserves the destination with O_CREAT|O_EXCL after the
     temporary file is complete, rejecting a destination created during the
@@ -40,6 +55,8 @@ def write_sheet_atomic(
     Protected paths are checked before creating the temp and again before
     publication. No input contents are opened or read.
     """
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
     destination = Path(os.path.abspath(destination))
     protected = tuple(Path(path) for path in protected_paths)
     if not destination.parent.exists():
@@ -54,7 +71,6 @@ def write_sheet_atomic(
             raise FileExistsError(destination)
         if not S_ISREG(destination.lstat().st_mode):
             raise ValueError("existing destination must be an ordinary file")
-    text = serialize_sheet(sheet, format)
     # Reject invalid UTF-8 text before any temporary file is created, too.
     text.encode("utf-8")
 
