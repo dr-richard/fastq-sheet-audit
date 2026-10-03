@@ -3,9 +3,8 @@
 A local, offline FASTQ ↔ sample-sheet preflight tool with a command-line audit,
 a native desktop GUI, and explicit, validated sample-sheet export.
 
-This README describes the **unreleased v0.2 development tree**. The package
-version remains `0.1.0` until release preparation; the historical v0.1 prototype
-is preserved in Git under the `v0.1.0` tag.
+This README describes **fastq-sheet-audit v0.2.0**. The historical v0.1
+prototype is preserved in Git under the `v0.1.0` tag.
 
 ## Why this exists
 
@@ -279,5 +278,5 @@ python -m pytest -q
 Tests are headless; they do not launch Tk. CI covers Ubuntu Python 3.10–3.14,
 representative Python 3.12 jobs on Windows/macOS, and isolated sdist/wheel,
 entry-point, and profile-resource validation. See [CHANGELOG.md](CHANGELOG.md)
-for the unreleased v0.2 changes and historical 0.1.0 entry, and
+for the v0.2.0 changes and historical 0.1.0 entry, and
 [SECURITY.md](SECURITY.md) for security reporting.

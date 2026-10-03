@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.2 — Unreleased
+## 0.2.0
 
 - Redesigned the deterministic domain pipeline around immutable workflow evidence.
 - Added lossless CSV/TSV sample-sheet import and deterministic alias/explicit column mapping.
