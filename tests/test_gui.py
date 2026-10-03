@@ -120,14 +120,25 @@ class FakeTable:
     def __init__(self, events):
         self.rows = [("old",)]
         self.events = events
+        self.selected = ()
+        self.identities = []
     def get_children(self):
         return tuple(range(len(self.rows)))
     def delete(self, *children):
         self.events.append("clear")
         self.rows.clear()
-    def insert(self, parent, index, *, values):
+        self.identities.clear()
+        self.selected = ()
+    def insert(self, parent, index, *, values, iid=None):
         self.events.append("insert")
         self.rows.append(values)
+        self.identities.append(iid)
+    def selection(self):
+        return self.selected
+    def selection_set(self, identity):
+        self.selected = (identity,)
+    def see(self, identity):
+        assert identity in self.identities
 
 
 def fake_application():
@@ -140,6 +151,9 @@ def fake_application():
         sample_sheet=FakeVariable("sheet.csv"), read_mode=FakeVariable("Auto"), events=events,
         mapping_state={}, mapping_variables=tuple((role, FakeVariable("Automatic")) for role in ColumnRole),
         mapping_boxes=tuple(Mock() for _ in ColumnRole),
+        session_state={}, r1_selection=FakeVariable("Automatic"), r2_selection=FakeVariable("Automatic"),
+        confirmation=FakeVariable(False), r1_box=Mock(), r2_box=Mock(),
+        confirmation_check=Mock(), apply_button=Mock(), reset_button=Mock(),
     )
 
 
@@ -190,7 +204,7 @@ def test_audit_callback_localizes_expected_errors_and_clears_old_data(monkeypatc
     application = fake_application()
     def fail(*args, **kwargs):
         raise ValueError("Ambiguous mapping")
-    monkeypatch.setattr(gui_controller, "audit_inputs", fail)
+    monkeypatch.setattr(gui_controller, "audit_session", fail)
     gui.audit_action(application)
     assert application.status.get() == "Audit failed: Ambiguous mapping"
     assert application.findings_table.rows == []
@@ -203,13 +217,13 @@ def test_audit_callback_success_and_unexpected_error_boundary(monkeypatch):
     from fastq_sheet_audit.presentation import SummaryView, WorkflowView
     application = fake_application()
     view = WorkflowView(SummaryView(2, 0, 0, 0, True), (), (), ())
-    monkeypatch.setattr(gui_controller, "audit_inputs", Mock(return_value=view))
+    monkeypatch.setattr(gui_controller, "audit_session", Mock(return_value=SimpleNamespace(view=view)))
     gui.audit_action(application)
     assert application.status.get() == "Audit complete: 2 FASTQs, 0 errors, 0 warnings."
     assert dict(application.summary_values)["ready_for_export"].get() == "Ready"
     def fail(*args, **kwargs):
         raise RuntimeError("unexpected")
-    monkeypatch.setattr(gui_controller, "audit_inputs", fail)
+    monkeypatch.setattr(gui_controller, "audit_session", fail)
     with pytest.raises(RuntimeError, match="unexpected"):
         gui.audit_action(application)
 
@@ -240,7 +254,7 @@ def test_stale_path_or_changed_columns_refuses_audit(tmp_path, monkeypatch):
     application.sample_sheet.set(str(path))
     gui.load_columns_action(application)
     audit = Mock()
-    monkeypatch.setattr(gui_controller, "audit_inputs", audit)
+    monkeypatch.setattr(gui_controller, "audit_session", audit)
     application.sample_sheet.set(str(tmp_path / "other.csv"))
     gui.audit_action(application)
     audit.assert_not_called()
@@ -283,7 +297,188 @@ def test_audit_passes_exact_mapping_overrides(tmp_path, monkeypatch):
     variables[ColumnRole.SAMPLE].set("[1] sampleid")
     variables[ColumnRole.R1].set("Automatic")
     variables[ColumnRole.R2].set("Unassigned")
-    audit = Mock(return_value=WorkflowView(SummaryView(0, 0, 0, 0, True), (), (), ()))
-    monkeypatch.setattr(gui_controller, "audit_inputs", audit)
+    audit = Mock(return_value=SimpleNamespace(view=WorkflowView(SummaryView(0, 0, 0, 0, True), (), (), ())))
+    monkeypatch.setattr(gui_controller, "audit_session", audit)
     gui.audit_action(application)
     assert audit.call_args.kwargs["overrides"] == {ColumnRole.SAMPLE: 1, ColumnRole.R2: None}
+
+
+def editor_session(*, selected="Automatic", confirmed=False):
+    from fastq_sheet_audit.presentation import PairView, SummaryView, WorkflowView
+    from fastq_sheet_audit.gui_controller import PairAdjudicationView, PairCandidateChoice
+    from fastq_sheet_audit.pairing import PairKey
+    from pathlib import Path
+    rows = (
+        PairView("first", 2, 1, None, "A_R2.fastq", 2, 0, confirmed, False),
+        PairView("second", 1, 0, "B_R1.fastq", None, 0, 0, False, True),
+    )
+    first_key = PairKey("A", None, None, None, "R", ".fastq", Path("."))
+    second_key = PairKey("B", None, None, None, "R", ".fastq", Path("."))
+    views = (
+        PairAdjudicationView(0, first_key, (
+            PairCandidateChoice(0, "A_R1.fastq", "[0] A_R1.fastq"),
+            PairCandidateChoice(1, "other/A_R1.fastq", "[1] other/A_R1.fastq"),
+        ), (PairCandidateChoice(0, "A_R2.fastq", "[0] A_R2.fastq"),), selected, "Automatic", confirmed, False),
+        PairAdjudicationView(1, second_key, (
+            PairCandidateChoice(0, "B_R1.fastq", "[0] B_R1.fastq"),
+        ), (), "[0] B_R1.fastq", "Unassigned", False, True),
+    )
+    return SimpleNamespace(view=WorkflowView(SummaryView(4, 0, 1, 1, False), (), (), rows), editors=views)
+
+
+def attach_session(application, session, monkeypatch):
+    from fastq_sheet_audit import gui_controller
+    monkeypatch.setattr(gui_controller, "pair_adjudication_views", lambda state: state.editors)
+    application.session_state.update(session=session, signature=gui.audit_input_signature(application))
+    gui.render_workflow(application, session.view)
+
+
+def test_initial_editor_disabled_and_selection_loads_exact_choices(monkeypatch):
+    application = fake_application()
+    gui.disable_pair_editor(application)
+    for control in (application.r1_box, application.r2_box, application.confirmation_check,
+                    application.apply_button, application.reset_button):
+        assert control.configure.call_args.kwargs["state"] == "disabled"
+    session = editor_session()
+    attach_session(application, session, monkeypatch)
+    assert application.pairing_table.identities == ["pair:0", "pair:1"]
+    assert application.pairing_table.selection() == ()
+    application.pairing_table.selection_set("pair:0")
+    gui.pair_selection_action(application)
+    assert application.r1_box.configure.call_args.kwargs == {
+        "state": "readonly", "values": ("Automatic", "Unassigned", "[0] A_R1.fastq", "[1] other/A_R1.fastq"),
+    }
+    assert application.r1_selection.get() == "Automatic"
+    assert application.r2_selection.get() == "Automatic"
+    assert application.confirmation.get() is False
+    gui.load_pair_editor(application, 1)
+    assert application.r1_selection.get() == "[0] B_R1.fastq"
+    assert application.r2_selection.get() == "Unassigned"
+
+
+@pytest.mark.parametrize("selection", [(), ("unknown",), ("pair:-1",), ("pair:99",), ("pair:00",), ("pair:0", "pair:1")])
+def test_invalid_selection_disables_without_guessing(monkeypatch, selection):
+    application = fake_application()
+    attach_session(application, editor_session(), monkeypatch)
+    gui.load_pair_editor(application, 0)
+    application.pairing_table.selected = selection
+    gui.pair_selection_action(application)
+    assert "pair_index" not in application.session_state
+    assert application.r1_selection.get() == "Automatic"
+    application.apply_button.configure.assert_called_with(state="disabled")
+
+
+def test_no_session_selection_disables_editor():
+    application = fake_application()
+    application.pairing_table.selection_set("pair:0")
+    gui.pair_selection_action(application)
+    assert "pair_index" not in application.session_state
+    application.apply_button.configure.assert_called_with(state="disabled")
+
+
+@pytest.mark.parametrize("reset", [False, True])
+def test_apply_and_reset_use_controller_replace_session_rerender_and_reload(monkeypatch, reset):
+    from fastq_sheet_audit import gui_controller
+    application = fake_application()
+    old = editor_session()
+    new = editor_session(selected="Automatic" if reset else "[1] other/A_R1.fastq", confirmed=not reset)
+    attach_session(application, old, monkeypatch)
+    gui.load_pair_editor(application, 0)
+    application.r1_selection.set("[1] other/A_R1.fastq")
+    application.r2_selection.set("Unassigned")
+    application.confirmation.set(True)
+    apply = Mock(return_value=new)
+    monkeypatch.setattr(gui_controller, "apply_pair_adjudication", apply)
+    (gui.reset_pair_action if reset else gui.apply_pair_action)(application)
+    apply.assert_called_once_with(old, 0, "Automatic" if reset else "[1] other/A_R1.fastq",
+                                  "Automatic" if reset else "Unassigned", False if reset else True)
+    assert application.session_state["session"] is new
+    assert application.session_state["pair_index"] == 0
+    assert application.pairing_table.selection() == ("pair:0",)
+    assert application.r1_selection.get() == new.editors[0].r1_selection
+    assert application.confirmation.get() is new.editors[0].confirmed
+    assert len(application.pairing_table.rows) == 2
+    assert application.status.get() == (
+        "Pair decision reset to automatic. Workflow revalidated." if reset else
+        "Pair decision applied. Workflow revalidated."
+    )
+    application.export_button.configure.assert_called_with(state="disabled")
+
+
+@pytest.mark.parametrize("field", ["fastq_directory", "sample_sheet", "read_mode", "column", "mapping_state"])
+@pytest.mark.parametrize("reset", [False, True])
+def test_stale_inputs_refuse_controller_call(monkeypatch, field, reset):
+    from fastq_sheet_audit import gui_controller
+    application = fake_application()
+    session = editor_session()
+    attach_session(application, session, monkeypatch)
+    gui.load_pair_editor(application, 0)
+    if field == "column":
+        application.mapping_variables[0][1].set("Unassigned")
+    elif field == "mapping_state":
+        application.mapping_state["path"] = "new.csv"
+    else:
+        getattr(application, field).set("changed")
+    apply = Mock()
+    monkeypatch.setattr(gui_controller, "apply_pair_adjudication", apply)
+    (gui.reset_pair_action if reset else gui.apply_pair_action)(application)
+    apply.assert_not_called()
+    assert application.status.get() == "Inputs changed. Run Audit again before adjudicating."
+    assert application.session_state["session"] is session
+
+
+@pytest.mark.parametrize("sample", [False, True])
+def test_browse_invalidation_only_after_selection(monkeypatch, sample):
+    application = fake_application()
+    session = editor_session()
+    attach_session(application, session, monkeypatch)
+    gui.load_pair_editor(application, 0)
+    chooser = Mock(return_value="")
+    dialogs = SimpleNamespace(askdirectory=chooser, askopenfilename=chooser)
+    monkeypatch.setitem(sys.modules, "tkinter", SimpleNamespace(filedialog=dialogs))
+    browse = gui.browse_sample_sheet if sample else gui.browse_fastq_directory
+    variable = application.sample_sheet if sample else application.fastq_directory
+    callback = (lambda: gui.clear_column_mapping(application)) if sample else (lambda: gui.invalidate_audit_session(application))
+    browse(variable, on_selected=callback)
+    assert application.session_state["session"] is session
+    chooser.return_value = "new path"
+    browse(variable, on_selected=callback)
+    assert application.session_state == {}
+    application.apply_button.configure.assert_called_with(state="disabled")
+
+
+def test_failed_audit_discards_session_and_success_starts_new_session(monkeypatch):
+    from fastq_sheet_audit import gui_controller
+    application = fake_application()
+    old = editor_session()
+    attach_session(application, old, monkeypatch)
+    gui.load_pair_editor(application, 0)
+    monkeypatch.setattr(gui_controller, "audit_session", Mock(side_effect=ValueError("bad input")))
+    gui.audit_action(application)
+    assert application.session_state == {}
+    application.apply_button.configure.assert_called_with(state="disabled")
+    new = editor_session()
+    monkeypatch.setattr(gui_controller, "audit_session", Mock(return_value=new))
+    gui.audit_action(application)
+    assert application.session_state["session"] is new
+    assert application.session_state["signature"] == gui.audit_input_signature(application)
+    assert "pair_index" not in application.session_state
+    assert application.pairing_table.selection() == ()
+    assert len(application.pairing_table.rows) == 2
+    application.export_button.configure.assert_called_with(state="disabled")
+
+
+def test_unexpected_apply_error_propagates_and_has_no_reload_scan_or_network(monkeypatch):
+    from fastq_sheet_audit import gui_controller
+    application = fake_application()
+    attach_session(application, editor_session(), monkeypatch)
+    gui.load_pair_editor(application, 0)
+    def forbidden(*args, **kwargs):
+        pytest.fail("adjudication accessed files or network")
+    monkeypatch.setattr(gui_controller, "load_sheet", forbidden)
+    monkeypatch.setattr(gui_controller, "scan_fastqs", forbidden)
+    monkeypatch.setattr(gui_controller, "inspect_sheet_mapping", forbidden)
+    monkeypatch.setattr("socket.socket", forbidden)
+    monkeypatch.setattr(gui_controller, "apply_pair_adjudication", Mock(side_effect=RuntimeError("programmer error")))
+    with pytest.raises(RuntimeError, match="programmer error"):
+        gui.apply_pair_action(application)

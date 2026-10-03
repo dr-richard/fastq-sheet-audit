@@ -1,4 +1,4 @@
-"""Native read-only audit GUI; export and adjudication are not connected.
+"""Native read-only audit and adjudication GUI; export is not connected.
 
 Manual smoke command: python -m fastq_sheet_audit.gui
 """
@@ -72,14 +72,25 @@ class ApplicationWindow:
     mapping_boxes: tuple[Any, ...] = ()
     load_columns_button: Any = None
     mapping_state: dict = field(default_factory=dict)
+    session_state: dict = field(default_factory=dict)
+    r1_selection: Any = None
+    r2_selection: Any = None
+    confirmation: Any = None
+    r1_box: Any = None
+    r2_box: Any = None
+    confirmation_check: Any = None
+    apply_button: Any = None
+    reset_button: Any = None
 
 
-def browse_fastq_directory(variable: Any, *, parent: Any = None) -> None:
+def browse_fastq_directory(variable: Any, *, parent: Any = None, on_selected: Any = None) -> None:
     from tkinter import filedialog
 
     selected = filedialog.askdirectory(parent=parent, title="Choose FASTQ directory")
     if selected:
         variable.set(selected)
+        if on_selected is not None:
+            on_selected()
 
 
 def browse_sample_sheet(variable: Any, *, parent: Any = None, on_selected: Any = None) -> None:
@@ -96,11 +107,117 @@ def browse_sample_sheet(variable: Any, *, parent: Any = None, on_selected: Any =
 
 
 def clear_column_mapping(application: ApplicationWindow) -> None:
+    invalidate_audit_session(application)
     application.mapping_state.clear()
     for _, variable in application.mapping_variables:
         variable.set("Automatic")
     for box in application.mapping_boxes:
         box.configure(state="disabled", values=())
+
+
+def audit_input_signature(application: ApplicationWindow) -> tuple:
+    """Exact GUI inputs only; never read files to check session freshness."""
+    return (
+        application.fastq_directory.get(), application.sample_sheet.get(), application.read_mode.get(),
+        tuple((role, variable.get()) for role, variable in application.mapping_variables),
+        application.mapping_state.get("path"), application.mapping_state.get("view"),
+    )
+
+
+def disable_pair_editor(application: ApplicationWindow) -> None:
+    application.session_state.pop("pair_index", None)
+    application.r1_selection.set("Automatic")
+    application.r2_selection.set("Automatic")
+    application.confirmation.set(False)
+    for box in (application.r1_box, application.r2_box):
+        box.configure(state="disabled", values=())
+    for control in (application.confirmation_check, application.apply_button, application.reset_button):
+        control.configure(state="disabled")
+
+
+def invalidate_audit_session(application: ApplicationWindow) -> None:
+    application.session_state.clear()
+    disable_pair_editor(application)
+    application.export_button.configure(state="disabled")
+
+
+def load_pair_editor(application: ApplicationWindow, pair_index: int) -> None:
+    from .gui_controller import pair_adjudication_views
+
+    session = application.session_state.get("session")
+    if session is None or type(pair_index) is not int:
+        disable_pair_editor(application)
+        return
+    views = pair_adjudication_views(session)
+    if not 0 <= pair_index < len(views):
+        disable_pair_editor(application)
+        return
+    view = views[pair_index]
+    application.session_state["pair_index"] = view.pair_index
+    application.r1_box.configure(state="readonly", values=("Automatic", "Unassigned") +
+                                 tuple(choice.display for choice in view.r1_choices))
+    application.r2_box.configure(state="readonly", values=("Automatic", "Unassigned") +
+                                 tuple(choice.display for choice in view.r2_choices))
+    application.r1_selection.set(view.r1_selection)
+    application.r2_selection.set(view.r2_selection)
+    application.confirmation.set(view.confirmed)
+    for control in (application.confirmation_check, application.apply_button, application.reset_button):
+        control.configure(state="normal")
+
+
+def pair_selection_action(application: ApplicationWindow) -> None:
+    selected = application.pairing_table.selection()
+    if len(selected) != 1:
+        disable_pair_editor(application)
+        return
+    identity = selected[0]
+    try:
+        index = int(identity.removeprefix("pair:"))
+    except (ValueError, AttributeError):
+        disable_pair_editor(application)
+        return
+    if identity != f"pair:{index}":
+        disable_pair_editor(application)
+        return
+    load_pair_editor(application, index)
+
+
+def _apply_pair_action(application: ApplicationWindow, *, reset: bool) -> None:
+    from .gui_controller import apply_pair_adjudication, pair_adjudication_views
+
+    try:
+        session = application.session_state.get("session")
+        if session is None:
+            raise ValueError("Run Audit and select a pair before adjudicating.")
+        if audit_input_signature(application) != application.session_state.get("signature"):
+            raise ValueError("Inputs changed. Run Audit again before adjudicating.")
+        index = application.session_state.get("pair_index")
+        if type(index) is not int or not 0 <= index < len(pair_adjudication_views(session)):
+            raise ValueError("Select a valid pair before adjudicating.")
+        new_session = apply_pair_adjudication(
+            session, index, "Automatic" if reset else application.r1_selection.get(),
+            "Automatic" if reset else application.r2_selection.get(),
+            False if reset else application.confirmation.get(),
+        )
+    except (ValueError, OSError) as error:
+        application.status.set(str(error))
+        application.export_button.configure(state="disabled")
+        return
+    application.session_state["session"] = new_session
+    render_workflow(application, new_session.view)
+    application.pairing_table.selection_set(f"pair:{index}")
+    application.pairing_table.see(f"pair:{index}")
+    load_pair_editor(application, index)
+    application.status.set("Pair decision reset to automatic. Workflow revalidated." if reset else
+                           "Pair decision applied. Workflow revalidated.")
+
+
+def apply_pair_action(application: ApplicationWindow) -> None:
+    _apply_pair_action(application, reset=False)
+
+
+def reset_pair_action(application: ApplicationWindow) -> None:
+    _apply_pair_action(application, reset=True)
 
 
 def load_columns_action(application: ApplicationWindow) -> None:
@@ -150,16 +267,17 @@ def render_workflow(application: ApplicationWindow, view: Any) -> None:
         application.inventory_table.insert("", "end", values=cells((
             row.relative_path, row.category, row.sample, row.read_role, row.lane, row.chunk,
         )))
-    for row in view.pairs:
-        application.pairing_table.insert("", "end", values=cells((
+    for index, row in enumerate(view.pairs):
+        application.pairing_table.insert("", "end", iid=f"pair:{index}", values=cells((
             row.key_text, row.r1_candidate_count, row.r2_candidate_count, row.effective_r1,
             row.effective_r2, row.unresolved_r1_count, row.unresolved_r2_count, row.confirmed, row.resolved,
         )))
 
 
 def audit_action(application: ApplicationWindow) -> None:
-    from .gui_controller import audit_inputs, inspect_sheet_mapping, mapping_overrides
+    from .gui_controller import audit_session, inspect_sheet_mapping, mapping_overrides
 
+    invalidate_audit_session(application)
     clear_audit_view(application)
     application.status.set("Auditing…")
     try:
@@ -174,11 +292,13 @@ def audit_action(application: ApplicationWindow) -> None:
                 clear_column_mapping(application)
                 raise ValueError("Sample-sheet columns changed. Load columns again.")
             overrides = mapping_overrides(view, {role: variable.get() for role, variable in application.mapping_variables})
-        view = audit_inputs(application.fastq_directory.get(), application.sample_sheet.get(),
+        session = audit_session(application.fastq_directory.get(), application.sample_sheet.get(),
                             application.read_mode.get(), overrides=overrides)
     except (OSError, ValueError) as error:
         application.status.set(f"Audit failed: {error}")
         return
+    application.session_state.update(session=session, signature=audit_input_signature(application))
+    view = session.view
     render_workflow(application, view)
     application.status.set(
         f"Audit complete: {view.summary.inventory_count} FASTQs, "
@@ -213,7 +333,8 @@ def build_application(root: Any) -> ApplicationWindow:
         ttk.Label(inputs, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(inputs, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=4)
         if row == 0:
-            command = lambda: browse_fastq_directory(fastq_directory, parent=root)
+            command = lambda: browse_fastq_directory(fastq_directory, parent=root,
+                                                     on_selected=lambda: invalidate_audit_session(application))
         else:
             command = lambda: browse_sample_sheet(sample_sheet, parent=root,
                                                   on_selected=lambda: clear_column_mapping(application))
@@ -273,8 +394,24 @@ def build_application(root: Any) -> ApplicationWindow:
     pairing_table = table(tabs[3], PAIR_COLUMNS)
     controls = ttk.Frame(tabs[3])
     controls.grid(row=2, column=0, sticky="w", pady=(8, 0))
-    for column, label in enumerate(("Select R1", "Select R2", "Unassign", "Confirm")):
-        ttk.Button(controls, text=label, state="disabled").grid(row=0, column=column, padx=(0, 8))
+    controls.columnconfigure(0, weight=1)
+    controls.columnconfigure(1, weight=1)
+    controls.grid_configure(sticky="ew")
+    r1_selection = tk.StringVar(root, value="Automatic")
+    r2_selection = tk.StringVar(root, value="Automatic")
+    confirmation = tk.BooleanVar(root, value=False)
+    ttk.Label(controls, text="R1 selection").grid(row=0, column=0, sticky="w")
+    ttk.Label(controls, text="R2 selection").grid(row=0, column=1, sticky="w")
+    r1_box = ttk.Combobox(controls, textvariable=r1_selection, state="disabled")
+    r2_box = ttk.Combobox(controls, textvariable=r2_selection, state="disabled")
+    r1_box.grid(row=1, column=0, sticky="ew", padx=(0, 8))
+    r2_box.grid(row=1, column=1, sticky="ew", padx=(0, 8))
+    confirmation_check = ttk.Checkbutton(controls, text="Confirmed", variable=confirmation, state="disabled")
+    confirmation_check.grid(row=1, column=2, padx=(0, 8))
+    apply_button = ttk.Button(controls, text="Apply decision", state="disabled")
+    apply_button.grid(row=1, column=3, padx=(0, 8))
+    reset_button = ttk.Button(controls, text="Reset automatic", state="disabled")
+    reset_button.grid(row=1, column=4)
 
     export_tab = tabs[4]
     export_tab.columnconfigure(1, weight=1)
@@ -289,9 +426,14 @@ def build_application(root: Any) -> ApplicationWindow:
     application = ApplicationWindow(root, fastq_directory, sample_sheet, read_mode, status, notebook,
                              findings_table, inventory_table, pairing_table, tuple(summary_values),
                              audit_button, export_button, tuple(mapping_variables), tuple(mapping_boxes),
-                             load_columns_button)
+                             load_columns_button, session_state={}, r1_selection=r1_selection,
+                             r2_selection=r2_selection, confirmation=confirmation, r1_box=r1_box, r2_box=r2_box,
+                             confirmation_check=confirmation_check, apply_button=apply_button, reset_button=reset_button)
     audit_button.configure(command=lambda: audit_action(application))
     load_columns_button.configure(command=lambda: load_columns_action(application))
+    pairing_table.bind("<<TreeviewSelect>>", lambda event: pair_selection_action(application))
+    apply_button.configure(command=lambda: apply_pair_action(application))
+    reset_button.configure(command=lambda: reset_pair_action(application))
     return application
 
 
