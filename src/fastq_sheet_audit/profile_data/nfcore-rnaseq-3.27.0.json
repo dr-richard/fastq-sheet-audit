@@ -6,11 +6,11 @@
   "verified_date": "2026-10-03",
   "source_reference": "Official nf-core/rnaseq 3.27.0 usage documentation: https://nf-co.re/rnaseq/3.27.0/docs/usage/; official tagged input schema: https://github.com/nf-core/rnaseq/blob/3.27.0/assets/schema_input.json",
   "columns": [
-    {"name": "sample", "value_type": "string", "required_column": true, "required_value": true},
-    {"name": "fastq_1", "value_type": "string", "required_column": true, "required_value": true},
-    {"name": "fastq_2", "value_type": "string", "required_column": true, "required_value": false},
+    {"name": "sample", "source_role": "sample", "value_type": "string", "required_column": true, "required_value": true},
+    {"name": "fastq_1", "source_role": "r1", "value_type": "string", "required_column": true, "required_value": true},
+    {"name": "fastq_2", "source_role": "r2", "value_type": "string", "required_column": true, "required_value": false},
     {
-      "name": "strandedness",
+      "name": "strandedness", "source_role": null,
       "value_type": "string", "required_column": true,
       "required_value": true,
       "allowed_values": ["forward", "reverse", "unstranded", "auto"],

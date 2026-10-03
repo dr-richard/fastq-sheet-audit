@@ -18,6 +18,7 @@ class ProfileColumn:
     value_type: Literal["string", "integer"]
     allowed_values: tuple[str, ...] | tuple[int, ...] | None = None
     default_value: str | int | None = None
+    source_role: Literal["sample", "r1", "r2"] | None = None
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,7 @@ _PROFILE_FIELDS = {
     "profile_id", "display_name", "pipeline", "verified_version", "verified_date",
     "source_reference", "columns", "input_kind", "single_end_supported", "notes",
 }
-_COLUMN_REQUIRED = {"name", "required_column", "required_value", "value_type"}
+_COLUMN_REQUIRED = {"name", "required_column", "required_value", "value_type", "source_role"}
 _COLUMN_FIELDS = _COLUMN_REQUIRED | {"allowed_values", "default_value"}
 _PROFILE_ID = re.compile(r"[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9_-]+)*")
 
@@ -109,12 +110,20 @@ def parse_profile(text: str) -> Profile:
 
     columns: list[ProfileColumn] = []
     names: set[str] = set()
+    source_roles: set[str] = set()
     for column in data["columns"]:
         _fields(column, _COLUMN_REQUIRED, _COLUMN_FIELDS, "column")
         _string(column["name"], "column name")
         if column["name"] in names:
             raise ValueError(f"duplicate column name: {column['name']}")
         names.add(column["name"])
+        source_role = column["source_role"]
+        if source_role is not None:
+            if not isinstance(source_role, str) or source_role not in ("sample", "r1", "r2"):
+                raise ValueError(f"{column['name']}: source_role must be 'sample', 'r1', 'r2', or null")
+            if source_role in source_roles:
+                raise ValueError(f"duplicate source_role: {source_role}")
+            source_roles.add(source_role)
         for flag in ("required_column", "required_value"):
             if type(column[flag]) is not bool:
                 raise ValueError(f"{column['name']}: {flag} must be a boolean")
@@ -135,7 +144,7 @@ def parse_profile(text: str) -> Profile:
         columns.append(ProfileColumn(
             column["name"], column["required_column"], column["required_value"],
             value_type,
-            tuple(allowed) if allowed is not None else None, default,
+            tuple(allowed) if allowed is not None else None, default, source_role,
         ))
     return Profile(
         data["profile_id"], data["display_name"], data["pipeline"],

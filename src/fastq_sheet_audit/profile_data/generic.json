@@ -6,9 +6,9 @@
   "verified_date": null,
   "source_reference": "fastq-sheet-audit generic export specification",
   "columns": [
-    {"name": "sample", "value_type": "string", "required_column": true, "required_value": true},
-    {"name": "r1", "value_type": "string", "required_column": true, "required_value": true},
-    {"name": "r2", "value_type": "string", "required_column": false, "required_value": false}
+    {"name": "sample", "source_role": "sample", "value_type": "string", "required_column": true, "required_value": true},
+    {"name": "r1", "source_role": "r1", "value_type": "string", "required_column": true, "required_value": true},
+    {"name": "r2", "source_role": "r2", "value_type": "string", "required_column": false, "required_value": false}
   ],
   "input_kind": "fastq_samplesheet",
   "single_end_supported": true,

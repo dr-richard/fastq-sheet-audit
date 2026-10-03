@@ -211,9 +211,9 @@ def test_smrnaseq_profile_remains_unchanged():
             "https://github.com/nf-core/smrnaseq/blob/2.4.1/assets/schema_input.json"
         ),
         "columns": [
-            {"name": "sample", "value_type": "string", "required_column": True, "required_value": True},
-            {"name": "fastq_1", "value_type": "string", "required_column": True, "required_value": True},
-            {"name": "fastq_2", "value_type": "string", "required_column": False, "required_value": False},
+            {"name": "sample", "source_role": "sample", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_1", "source_role": "r1", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_2", "source_role": "r2", "value_type": "string", "required_column": False, "required_value": False},
         ],
         "input_kind": "fastq_samplesheet",
         "single_end_supported": True,
@@ -278,10 +278,10 @@ def test_methylseq_profile_remains_unchanged():
             "https://github.com/nf-core/methylseq/blob/4.2.0/assets/schema_input.json"
         ),
         "columns": [
-            {"name": "sample", "value_type": "string", "required_column": True, "required_value": True},
-            {"name": "fastq_1", "value_type": "string", "required_column": True, "required_value": True},
-            {"name": "fastq_2", "value_type": "string", "required_column": True, "required_value": False},
-            {"name": "genome", "value_type": "string", "required_column": True, "required_value": False},
+            {"name": "sample", "source_role": "sample", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_1", "source_role": "r1", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_2", "source_role": "r2", "value_type": "string", "required_column": True, "required_value": False},
+            {"name": "genome", "source_role": None, "value_type": "string", "required_column": True, "required_value": False},
         ],
         "input_kind": "fastq_samplesheet",
         "single_end_supported": True,
@@ -339,10 +339,10 @@ def test_rnaseq_profile_remains_unchanged():
             "https://github.com/nf-core/rnaseq/blob/3.27.0/assets/schema_input.json"
         ),
         "columns": [
-            {"name": "sample", "value_type": "string", "required_column": True, "required_value": True},
-            {"name": "fastq_1", "value_type": "string", "required_column": True, "required_value": True},
-            {"name": "fastq_2", "value_type": "string", "required_column": True, "required_value": False},
-            {"name": "strandedness", "value_type": "string", "required_column": True, "required_value": True,
+            {"name": "sample", "source_role": "sample", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_1", "source_role": "r1", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_2", "source_role": "r2", "value_type": "string", "required_column": True, "required_value": False},
+            {"name": "strandedness", "source_role": None, "value_type": "string", "required_column": True, "required_value": True,
              "allowed_values": ["forward", "reverse", "unstranded", "auto"], "default_value": None},
         ],
         "input_kind": "fastq_samplesheet",
@@ -398,9 +398,9 @@ def test_generic_profile_remains_unchanged():
         "verified_date": None,
         "source_reference": "fastq-sheet-audit generic export specification",
         "columns": [
-            {"name": "sample", "value_type": "string", "required_column": True, "required_value": True},
-            {"name": "r1", "value_type": "string", "required_column": True, "required_value": True},
-            {"name": "r2", "value_type": "string", "required_column": False, "required_value": False},
+            {"name": "sample", "source_role": "sample", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "r1", "source_role": "r1", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "r2", "source_role": "r2", "value_type": "string", "required_column": False, "required_value": False},
         ],
         "input_kind": "fastq_samplesheet",
         "single_end_supported": True,
@@ -510,8 +510,8 @@ def test_barcode_mapping_accepts_null_single_end_support():
     data = generic_data()
     data.update(input_kind="barcode_mapping", single_end_supported=None)
     data["columns"] = [
-        {"name": "sample", "required_column": True, "required_value": True, "value_type": "string"},
-        {"name": "barcode", "required_column": True, "required_value": True, "value_type": "integer"},
+        {"name": "sample", "source_role": "sample", "required_column": True, "required_value": True, "value_type": "string"},
+        {"name": "barcode", "source_role": None, "required_column": True, "required_value": True, "value_type": "integer"},
     ]
     profile = parse_profile(json.dumps(data))
     assert profile.input_kind == "barcode_mapping"
@@ -556,6 +556,65 @@ def test_missing_input_kind_rejected():
     del data["input_kind"]
     with pytest.raises(ValueError, match="missing fields: input_kind"):
         parse_profile(json.dumps(data))
+
+
+@pytest.mark.parametrize("profile_id, roles", [
+    ("generic", ("sample", "r1", "r2")),
+    ("nfcore-rnaseq-3.27.0", ("sample", "r1", "r2", None)),
+    ("nfcore-methylseq-4.2.0", ("sample", "r1", "r2", None)),
+    ("nfcore-smrnaseq-2.4.1", ("sample", "r1", "r2")),
+    ("nfcore-viralrecon-3.0.0-illumina", ("sample", "r1", "r2")),
+    ("nfcore-viralrecon-3.0.0-nanopore", ("sample", None)),
+])
+def test_bundled_source_roles_exact(profile_id, roles):
+    profile = load_profile(profile_id)
+    assert tuple(column.source_role for column in profile.columns) == roles
+    text = files("fastq_sheet_audit.profile_data").joinpath(profile_id + ".json").read_text()
+    data = json.loads(text)
+    assert tuple(column["source_role"] for column in data["columns"]) == roles
+    assert parse_profile(text) == load_profile(profile_id) == profile
+    with pytest.raises(FrozenInstanceError):
+        profile.columns[0].source_role = "r1"
+
+
+def test_missing_source_role_rejected():
+    data = generic_data()
+    del data["columns"][0]["source_role"]
+    with pytest.raises(ValueError, match="missing fields: source_role"):
+        parse_profile(json.dumps(data))
+
+
+@pytest.mark.parametrize("role", ["R1", "Sample", " r1", "r1 ", "fastq_1", "", True, 1, [], {}])
+def test_invalid_source_role_rejected(role):
+    data = generic_data()
+    data["columns"][0]["source_role"] = role
+    with pytest.raises(ValueError, match="source_role"):
+        parse_profile(json.dumps(data))
+
+
+def test_duplicate_source_role_rejected_for_distinct_column_names():
+    data = generic_data()
+    data["columns"][1]["source_role"] = "sample"
+    with pytest.raises(ValueError, match="duplicate source_role: sample"):
+        parse_profile(json.dumps(data))
+
+
+def test_multiple_null_roles_allowed_without_name_inference():
+    data = generic_data()
+    for column in data["columns"]:
+        column["source_role"] = None
+    profile = parse_profile(json.dumps(data))
+    assert all(column.source_role is None for column in profile.columns)
+    assert [column.name for column in profile.columns] == ["sample", "r1", "r2"]
+
+
+def test_roles_are_declarative_and_not_required_globally():
+    data = generic_data()
+    data["columns"] = [{"name": "custom_path", "source_role": "r2", "value_type": "string",
+                        "required_column": True, "required_value": False}]
+    profile = parse_profile(json.dumps(data))
+    assert profile.columns[0].source_role == "r2"
+    assert profile.columns[0].name == "custom_path"
 
 
 def test_load_nfcore_viralrecon_nanopore_metadata():
@@ -613,9 +672,9 @@ def test_viralrecon_illumina_profile_remains_unchanged():
             "https://github.com/nf-core/viralrecon/blob/3.0.0/assets/schema_input.json"
         ),
         "columns": [
-            {"name": "sample", "value_type": "string", "required_column": True, "required_value": True},
-            {"name": "fastq_1", "value_type": "string", "required_column": True, "required_value": True},
-            {"name": "fastq_2", "value_type": "string", "required_column": True, "required_value": False},
+            {"name": "sample", "source_role": "sample", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_1", "source_role": "r1", "value_type": "string", "required_column": True, "required_value": True},
+            {"name": "fastq_2", "source_role": "r2", "value_type": "string", "required_column": True, "required_value": False},
         ],
         "input_kind": "fastq_samplesheet",
         "single_end_supported": True,
