@@ -7,8 +7,11 @@ from typing import Mapping
 from .adjudication import PairDecision, RoleDecision, RoleDecisionKind
 from .column_mapping import ColumnMappingResult, ColumnRole, map_columns
 from .inventory import InventoryRecord, scan_fastqs
+from .export_plan import ExportPlan, build_export_plan
 from .pairing import PairKey
+from .pathmap import ExportMode, TargetStyle
 from .presentation import WorkflowView, present_workflow
+from .profiles import Profile, list_profile_ids, load_profile
 from .read_mode import ReadMode
 from .sheet import SampleSheet, load_sheet
 from .workflow import WorkflowSnapshot, build_workflow_snapshot
@@ -92,6 +95,7 @@ class AuditSession:
     decisions: tuple[PairDecision, ...]
     snapshot: WorkflowSnapshot
     view: WorkflowView
+    sample_sheet_path: Path
 
 
 @dataclass(frozen=True)
@@ -136,7 +140,8 @@ def audit_session(
     root = root.absolute()
     records = scan_fastqs(root)
     snapshot = build_workflow_snapshot(sheet, mapping, records, root, read_mode=mode)
-    return AuditSession(sheet, mapping, snapshot.inventory, root, mode, (), snapshot, present_workflow(snapshot))
+    return AuditSession(sheet, mapping, snapshot.inventory, root, mode, (), snapshot,
+                        present_workflow(snapshot), sheet_path.absolute())
 
 
 def audit_inputs(
@@ -209,3 +214,96 @@ def apply_pair_adjudication(
     ordered = tuple(decisions[resolution.group.key] for resolution in snapshot.pair_resolutions
                     if resolution.group.key in decisions)
     return replace(session, decisions=ordered, snapshot=snapshot, view=present_workflow(snapshot))
+
+
+@dataclass(frozen=True)
+class ExportProfileColumnView:
+    name: str
+    required_column: bool
+    required_value: bool
+    value_type: str
+    allowed_values: tuple[str, ...] | tuple[int, ...] | None
+    source_role: str | None
+
+
+@dataclass(frozen=True)
+class ExportProfileView:
+    profile_id: str
+    display_name: str
+    input_kind: str
+    columns: tuple[ExportProfileColumnView, ...]
+    notes: str
+
+
+def _export_profile_view(profile: Profile) -> ExportProfileView:
+    return ExportProfileView(profile.profile_id, profile.display_name, profile.input_kind, tuple(
+        ExportProfileColumnView(column.name, column.required_column, column.required_value,
+                                column.value_type, column.allowed_values, column.source_role)
+        for column in profile.columns
+    ), profile.notes)
+
+
+def export_profile_views() -> tuple[ExportProfileView, ...]:
+    return tuple(_export_profile_view(load_profile(profile_id)) for profile_id in list_profile_ids())
+
+
+PATH_MODE_CHOICES = (
+    ("Local absolute", ExportMode.LOCAL_ABSOLUTE),
+    ("Relative to FASTQ root", ExportMode.RELATIVE_TO_ROOT),
+    ("Rebased root", ExportMode.REBASED_ROOT),
+)
+TARGET_STYLE_CHOICES = (("POSIX", TargetStyle.POSIX), ("Windows", TargetStyle.WINDOWS))
+
+
+def path_mode_from_label(label: str) -> ExportMode:
+    for display, mode in PATH_MODE_CHOICES:
+        if label == display:
+            return mode
+    raise ValueError(f"unknown path mode: {label!r}")
+
+
+def target_style_from_label(label: str) -> TargetStyle:
+    for display, style in TARGET_STYLE_CHOICES:
+        if label == display:
+            return style
+    raise ValueError(f"unknown target style: {label!r}")
+
+
+def manual_profile_columns(profile_view: ExportProfileView) -> tuple[ExportProfileColumnView, ...]:
+    return tuple(column for column in profile_view.columns if column.source_role is None)
+
+
+@dataclass(frozen=True)
+class SessionExportPlan:
+    profile_view: ExportProfileView
+    plan: ExportPlan
+
+
+def plan_session_export(
+    session: AuditSession,
+    profile_id: str,
+    path_mode_label: str,
+    *,
+    target_root: str = "",
+    target_style_label: str = "",
+    explicit_values: Mapping[int, Mapping[str, str]] | None = None,
+) -> SessionExportPlan:
+    """Delegate pure planning; bundled profile loading is the only resource I/O.
+
+    Missing/invalid manual values remain profile validation findings in the
+    returned plan. No sheet reload, FASTQ rescan, or output write occurs.
+    """
+    profile = load_profile(profile_id)
+    mode = path_mode_from_label(path_mode_label)
+    if mode is ExportMode.REBASED_ROOT:
+        if not target_root:
+            raise ValueError("Rebased root requires a target root")
+        style = target_style_from_label(target_style_label)
+        root = target_root
+    else:
+        if target_root or target_style_label:
+            raise ValueError("target root/style apply only to Rebased root")
+        style, root = None, None
+    plan = build_export_plan(session.sheet, session.mapping, session.snapshot, profile, mode,
+                             target_root=root, target_style=style, explicit_values=explicit_values)
+    return SessionExportPlan(_export_profile_view(profile), plan)

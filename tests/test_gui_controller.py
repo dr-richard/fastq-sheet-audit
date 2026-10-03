@@ -185,7 +185,7 @@ def session_fixture(tmp_path, mode="Auto", ambiguous=False):
         snapshot = build_workflow_snapshot(sheet, mapping, records, root,
                                            read_mode=controller.read_mode_from_label(mode))
         return controller.AuditSession(sheet, mapping, snapshot.inventory, root,
-                                       controller.read_mode_from_label(mode), (), snapshot, present_workflow(snapshot))
+                                       controller.read_mode_from_label(mode), (), snapshot, present_workflow(snapshot), path.absolute())
     return controller.audit_session(str(root), str(path), mode)
 
 
@@ -329,3 +329,142 @@ def test_adjudication_keeps_raw_collisions_and_reconciliation_findings(tmp_path)
     assert updated.snapshot.case_collisions
     assert updated.snapshot.reconciliation.findings
     assert not updated.view.summary.ready_for_export
+
+
+def test_session_retains_exact_absolute_sheet_path(tmp_path, monkeypatch):
+    root, path = inputs(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    session = controller.audit_session("fastqs", "sheet.csv", "Auto")
+    assert session.sample_sheet_path == path
+    assert session.sample_sheet_path.is_absolute()
+    assert session.fastq_root == root
+    assert session.view == controller.audit_inputs("fastqs", "sheet.csv", "Auto")
+
+
+def test_export_profile_views_exact_metadata_and_manual_fields():
+    from fastq_sheet_audit.profiles import list_profile_ids, load_profile
+    views = controller.export_profile_views()
+    assert tuple(view.profile_id for view in views) == list_profile_ids()
+    assert controller.export_profile_views() == views
+    manual = {
+        "generic": (), "nfcore-rnaseq-3.27.0": ("strandedness",),
+        "nfcore-methylseq-4.2.0": ("genome",), "nfcore-smrnaseq-2.4.1": (),
+        "nfcore-viralrecon-3.0.0-illumina": (), "nfcore-viralrecon-3.0.0-nanopore": ("barcode",),
+    }
+    for view in views:
+        profile = load_profile(view.profile_id)
+        assert (view.display_name, view.input_kind, view.notes) == (profile.display_name, profile.input_kind, profile.notes)
+        assert tuple(column.name for column in controller.manual_profile_columns(view)) == manual[view.profile_id]
+        assert [(column.name, column.source_role, column.allowed_values) for column in view.columns] == [
+            (column.name, column.source_role, column.allowed_values) for column in profile.columns
+        ]
+    nanopore = views[-1]
+    assert nanopore.input_kind == "barcode_mapping"
+    assert nanopore.columns[0].source_role == "sample"
+    assert nanopore.columns[1].source_role is None
+
+
+def test_exact_export_option_mappings():
+    from fastq_sheet_audit.pathmap import ExportMode, TargetStyle
+    assert controller.PATH_MODE_CHOICES == (
+        ("Local absolute", ExportMode.LOCAL_ABSOLUTE),
+        ("Relative to FASTQ root", ExportMode.RELATIVE_TO_ROOT),
+        ("Rebased root", ExportMode.REBASED_ROOT),
+    )
+    for label, mode in controller.PATH_MODE_CHOICES:
+        assert controller.path_mode_from_label(label) is mode
+    for label, style in (("POSIX", TargetStyle.POSIX), ("Windows", TargetStyle.WINDOWS)):
+        assert controller.target_style_from_label(label) is style
+    for label in ("", "windows", "Relative", "auto"):
+        with pytest.raises(ValueError):
+            controller.path_mode_from_label(label)
+        with pytest.raises(ValueError):
+            controller.target_style_from_label(label)
+
+
+@pytest.mark.parametrize("label, options, expected", [
+    ("Relative to FASTQ root", {}, "A_R1.fastq"),
+    ("Local absolute", {}, None),
+    ("Rebased root", {"target_root": "/data/项目", "target_style_label": "POSIX"}, "/data/项目/A_R1.fastq"),
+    ("Rebased root", {"target_root": "D:\\项目", "target_style_label": "Windows"}, "D:\\项目\\A_R1.fastq"),
+])
+def test_session_export_path_options(tmp_path, label, options, expected):
+    session = session_fixture(tmp_path)
+    result = controller.plan_session_export(session, "generic", label, **options)
+    assert result.plan.result.validation.ok
+    assert result.plan.rows[0].values["r1"] == (expected or str(session.fastq_root / "A_R1.fastq"))
+    assert result.profile_view.profile_id == "generic"
+
+
+@pytest.mark.parametrize("label, options", [
+    ("Rebased root", {}), ("Rebased root", {"target_root": "/data"}),
+    ("Rebased root", {"target_style_label": "POSIX"}),
+    ("Local absolute", {"target_root": "/data"}),
+    ("Relative to FASTQ root", {"target_style_label": "Windows"}),
+])
+def test_session_export_rejects_invalid_target_options(tmp_path, label, options):
+    session = session_fixture(tmp_path)
+    with pytest.raises(ValueError):
+        controller.plan_session_export(session, "generic", label, **options)
+
+
+@pytest.mark.parametrize("manual, code", [(None, "EMPTY_REQUIRED_VALUE"),
+    ({2: {"strandedness": "reverse"}}, None), ({2: {"strandedness": "Reverse"}}, "VALUE_NOT_ALLOWED")])
+def test_session_export_returns_manual_validation_findings(tmp_path, manual, code):
+    session = session_fixture(tmp_path)
+    result = controller.plan_session_export(session, "nfcore-rnaseq-3.27.0", "Relative to FASTQ root", explicit_values=manual)
+    if code is None:
+        assert result.plan.result.validation.ok
+    else:
+        assert result.plan.result.validation.findings[0].code == code
+
+
+def test_barcode_and_nonready_planning_rejected(tmp_path):
+    session = session_fixture(tmp_path)
+    with pytest.raises(ValueError, match="barcode_mapping"):
+        controller.plan_session_export(session, "nfcore-viralrecon-3.0.0-nanopore", "Local absolute")
+    updated = controller.apply_pair_adjudication(session, 0, "Unassigned", "Automatic", False)
+    with pytest.raises(ValueError, match="workflow is not ready"):
+        controller.plan_session_export(updated, "generic", "Local absolute")
+
+
+def test_planning_uses_effective_read_not_original_sheet_path(tmp_path):
+    session = session_fixture(tmp_path, ambiguous=True)
+    view = controller.pair_adjudication_views(session)[0]
+    original_path = session.fastq_root / session.sheet.rows[0].cells[1]
+    alternate_index = next(index for index, record in enumerate(session.snapshot.pair_resolutions[0].group.r1)
+                           if record.path != original_path)
+    updated = controller.apply_pair_adjudication(session, 0, view.r1_choices[alternate_index].display, "Automatic", False)
+    effective = updated.snapshot.pair_resolutions[0].effective_r1
+    result = controller.plan_session_export(updated, "generic", "Local absolute")
+    assert result.plan.rows[0].values["r1"] == str(effective.path)
+    assert result.plan.rows[0].values["r1"] != str(updated.fastq_root / updated.sheet.rows[0].cells[1])
+
+
+def test_planning_no_reload_scan_writes_network_and_inputs_unchanged(tmp_path, monkeypatch):
+    from dataclasses import FrozenInstanceError
+    session = session_fixture(tmp_path)
+    before = session.view
+    manual = {2: {"strandedness": "reverse"}}
+    original_open = Path.open
+    def guarded_open(self, mode="r", *args, **kwargs):
+        assert self.suffix == ".json" and "profile_data" in self.parts
+        assert mode == "r"
+        return original_open(self, mode, *args, **kwargs)
+    def fail(*args, **kwargs):
+        pytest.fail("planning accessed forbidden side effect")
+    monkeypatch.setattr(controller, "load_sheet", fail)
+    monkeypatch.setattr(controller, "scan_fastqs", fail)
+    monkeypatch.setattr(Path, "open", guarded_open)
+    for method in ("write_text", "write_bytes", "rename", "unlink"):
+        monkeypatch.setattr(Path, method, fail)
+    monkeypatch.setattr("socket.socket", fail)
+    result = controller.plan_session_export(session, "nfcore-rnaseq-3.27.0", "Relative to FASTQ root", explicit_values=manual)
+    assert result.plan.result.validation.ok
+    assert session.view is before
+    assert session.decisions == ()
+    assert manual == {2: {"strandedness": "reverse"}}
+    for obj, field, value in [(result, "plan", None), (result.profile_view, "notes", "changed"),
+                              (result.profile_view.columns[0], "source_role", None), (session, "sample_sheet_path", None)]:
+        with pytest.raises(FrozenInstanceError):
+            setattr(obj, field, value)
